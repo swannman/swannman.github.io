@@ -117,6 +117,16 @@
           <option value="0.58">Rotor — large (PGP #8) · K 0.58</option>
         </select>
       </div>
+      <div class="ctl">
+        <label>Sprinkler elevation <b id="vElev">0 ft</b></label>
+        <input id="elev" type="range" min="-100" max="100" value="0" step="5">
+      </div>
+
+      <div class="ctl">
+        <div class="switch on" id="csvToggle">
+          <div class="dot"></div><div>Cycle Stop Valve installed</div>
+        </div>
+      </div>
 
       <div class="ctl">
         <label>CSV hold pressure <b id="vCsv">50</b> psi</label>
@@ -146,8 +156,8 @@
       </div>
 
       <div class="ctl">
-        <label>Simulation speed <b id="vSpeed">20</b>×</label>
-        <input id="speed" type="range" min="1" max="60" value="20" step="1">
+        <label>Simulation speed <b id="vSpeed">10</b>×</label>
+        <input id="speed" type="range" min="1" max="60" value="10" step="1">
       </div>
 
       <div class="ctl">
@@ -191,7 +201,8 @@ const PSI_PER_FT = 0.4335;
 const STATIC_LIFT_FT = 10;              // cistern lift
 const STATIC_LIFT_PSI = STATIC_LIFT_FT * PSI_PER_FT;   // 4.335 psi
 const KF_FT = 0.022;                    // friction coeff ft/gpm^2 (1.25" PVC,100ft)
-const KF_PSI = KF_FT * PSI_PER_FT;      // ~0.00954 psi/gpm^2
+const KF_PSI = KF_FT * PSI_PER_FT;      // ~0.00954 psi/gpm^2  (pump -> CSV riser)
+const KF_LAT = 0.012;                   // lateral friction psi/gpm^2 (tank -> heads)
 const CSV_MIN = 5.0;                    // CSV3A minimum continuous bypass (gpm)
 const CSV_MIN_DROP = 7.0;               // CSV3A min friction loss to regulate (psi)
 const CSV_DIFF_MAX = 125;               // single-valve recommended max differential (psi)
@@ -213,20 +224,42 @@ function pumpFlowAtPressure(P){
   const v = (C1 - P)/C2;
   return v>0 ? Math.sqrt(v) : 0;
 }
-// "Natural" downstream pressure with CSV fully open (pump∩sprinkler operating pt)
-function naturalPressure(A){                    // A = N*K  (zone discharge coeff)
-  const C1 = 175.9 - STATIC_LIFT_PSI;
-  const C2 = 0.05516 + KF_PSI;
-  return C1 / (1 + C2*A*A);
-}
-// Sprinkler zone demand: Q = N*K*sqrt(P)
+// Ideal sprinkler zone demand at a given head pressure: Q = N*K*sqrt(P)
 function sprinklerDemand(A, P){ return A * Math.sqrt(Math.max(P,0)); }
+
+// Actual zone demand from the SYSTEM (tank) pressure, accounting for sprinkler
+// elevation (static head) and lateral pipe friction between tank and heads.
+//   P_head = P_tank - elevation_head - lateral_friction(Q);   Q = A*sqrt(P_head)
+// Returns {Q: zone gpm, Phead: pressure actually at the heads}.
+function solveDemand(A, Ptank){
+  const avail = Ptank - elevPsi();              // pressure left after lifting to heads
+  if(A<=0 || avail<=0) return { Q:0, Phead:Math.max(0,avail) };
+  let Q = A*Math.sqrt(avail);
+  for(let k=0;k<8;k++){ const Ph=Math.max(0, avail - KF_LAT*Q*Q); Q = A*Math.sqrt(Ph); }
+  const Phead = Math.max(0, avail - KF_LAT*Q*Q);
+  return { Q, Phead };
+}
+function elevPsi(){ return params.elev * PSI_PER_FT; }   // +ft above pump => +psi to lift
+
+// Equilibrium system pressure with the valve wide open (or no CSV): the point
+// where pump supply equals zone demand. Solved numerically (monotonic bisection).
+function naturalPressure(A){
+  let lo=0, hi=176;
+  for(let i=0;i<44;i++){
+    const mid=(lo+hi)/2;
+    const qp=pumpFlowAtPressure(mid);           // decreases with pressure
+    const qd=solveDemand(A,mid).Q;              // increases with pressure
+    if(qp>qd) lo=mid; else hi=mid;
+  }
+  return (lo+hi)/2;
+}
 
 //=================================================================
 //  SIMULATION STATE
 //=================================================================
 const params = {
-  N:6, K:0.29, csv:50, cin:40, cout:60, Vtank:20, speed:20, power:true
+  N:6, K:0.29, csv:50, cin:40, cout:60, Vtank:20, speed:10,
+  power:true, csvEnabled:true, elev:0   // elev in ft, + above pump
 };
 let S = null;
 function precharge(){ return params.cin - 2; }
@@ -238,8 +271,9 @@ function resetSim(){
   const startP = clamp(params.csv, params.cin+1, params.cout-1);
   S = {
     pumpOn: params.power, Pd: startP, Vair: vairAtP(startP),
-    Qpump:0, Qdem:0, Qnet:0, regime:"—", t:0, Pdisch:0, throttle:0, BHP:0,
-    hist:[]   // {t, Pd, on}
+    Qpump:0, Qdem:0, Qnet:0, regime:"—", t:0,
+    Ppump:0, Pcsvin:0, Phead:startP, throttle:0, BHP:0,
+    starts:[], cyclesPerHr:0, hist:[]   // hist: {t, Pd, on}
   };
 }
 
@@ -254,90 +288,99 @@ function step(dtMin){
   if(!params.power){ S.pumpOn = false; }
 
   let Pd = S.Pd, Vair = S.Vair, pumpOn = S.pumpOn;
-  let Qpump=0, Qdem=0, Qnet=0, regime="off";
-  const Pnat = naturalPressure(A);               // CSV-open operating pressure
-  const Qreg = sprinklerDemand(A, setp);         // demand if held at setpoint
-  // CSV can hold setpoint only if pump discharge exceeds it by the min valve drop
-  const canRegulate = pumpDischarge(Qreg) >= setp + CSV_MIN_DROP;
+  let Qpump=0, Qnet=0, regime="off";
+  const Pnat = naturalPressure(A);               // valve-open / no-CSV operating pressure
 
-  if(pumpOn){
-    if(canRegulate){
-      // --- CSV CAN HOLD SETPOINT ---
-      if(Pd < setp - 0.05){
-        // pressurizing: pump rides up its curve delivering MORE than demand,
-        // charging the tank/line via Boyle until pressure reaches the setpoint
-        regime = "pressurizing";
-        Qpump = pumpFlowAtPressure(Pd);
-        Qdem  = sprinklerDemand(A, Pd);
-        Qnet  = Qpump - Qdem;                          // >0 into tank
-        Vair  = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
-        Pd    = pFromVair(Vair);
-        if(Pd >= setp){ Pd = setp; Vair = vairAtP(setp); }   // arrived
-        Qdem  = sprinklerDemand(A, Pd);
-      } else {
-        Qdem = sprinklerDemand(A, setp);
-        if(Qdem >= CSV_MIN){
+  if(params.csvEnabled){
+    // ===================== CSV SYSTEM =====================
+    const Qreg = solveDemand(A, setp).Q;         // demand if tank held at setpoint
+    // CSV holds setpoint only if pump discharge exceeds it by the min valve drop
+    const canRegulate = pumpDischarge(Qreg) >= setp + CSV_MIN_DROP;
+    if(pumpOn){
+      if(canRegulate){
+        if(Pd < setp - 0.05){
+          // pressurizing: pump rides up its curve, charging tank to the setpoint
+          regime = "pressurizing";
+          Qpump = pumpFlowAtPressure(Pd);
+          Qnet  = Qpump - solveDemand(A, Pd).Q;        // >0 into tank
+          Vair  = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+          Pd    = pFromVair(Vair);
+          if(Pd >= setp){ Pd = setp; Vair = vairAtP(setp); }
+        } else if(Qreg >= CSV_MIN){
           // pinned: pump runs continuously, tank static at setpoint
           regime = "regulating";
-          Qpump = Qdem; Qnet = 0;
+          Qpump = Qreg; Qnet = 0;
           Pd = setp; Vair = vairAtP(setp);
         } else {
           // near-zero demand: 5 gpm min bypass over-fills tank toward cut-out
           regime = "bypass-fill";
-          Qpump = CSV_MIN; Qnet = CSV_MIN - Qdem;     // >0 into tank
+          Qpump = CSV_MIN; Qnet = CSV_MIN - solveDemand(A, Pd).Q;
           Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
           Pd = pFromVair(Vair);
-          Qdem = sprinklerDemand(A, Pd);
         }
+      } else {
+        // overdrive: valve wide open, can no longer hold the setpoint
+        regime = "overdrive";
+        Qpump = pumpFlowAtPressure(Pd);
+        Qnet = Qpump - solveDemand(A, Pd).Q;           // typically <0
+        Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+        Pd = (Vair >= VairEmpty - 1e-6) ? Pd + (Pnat - Pd)*Math.min(1,dtMin*8)
+                                        : pFromVair(Vair);
       }
     } else {
-      // --- OVERDRIVE: demand exceeds pump at setpoint, CSV wide open ---
-      regime = "overdrive";
-      // drain whatever the tank holds, then float at natural pressure
-      Qdem = sprinklerDemand(A, Pd);
-      Qpump = pumpFlowAtPressure(Pd);
-      Qnet = Qpump - Qdem;                            // typically <0
+      regime = params.power ? "pump off" : "powered down";
+      Qpump = 0; Qnet = -solveDemand(A, Pd).Q;
       Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
       if(Vair >= VairEmpty - 1e-6){
-        // tank empty -> pressure governed by pump/demand equilibrium
-        Pd = Pd + (Pnat - Pd) * Math.min(1, dtMin*8); // relax toward equilibrium
-      } else {
-        Pd = pFromVair(Vair);
-      }
-      Qpump = pumpFlowAtPressure(Pd);
-      Qdem  = sprinklerDemand(A, Pd);
+        if(solveDemand(A,Pd).Q > 0.001) regime = "tank empty";
+        Pd = Math.max(0, Pd * (1 - Math.min(1, 18*dtMin)));   // collapse to zero
+      } else Pd = pFromVair(Vair);
     }
   } else {
-    // --- PUMP OFF: tank drawdown supplies demand, pressure decays ---
-    regime = params.power ? "pump off" : "powered down";
-    Qpump = 0;
-    Qdem = sprinklerDemand(A, Pd);
-    Qnet = -Qdem;
-    Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
-    if(Vair >= VairEmpty - 1e-6){
-      // tank bladder empty + no pump = no water source -> pressure/flow collapse to 0
-      if(Qdem > 0.001) regime = "tank empty";
-      Pd = Math.max(0, Pd * (1 - Math.min(1, 18*dtMin)));   // rapid decay to zero
+    // ===================== CONVENTIONAL (NO CSV) =====================
+    // Pump output is unregulated: it rides its curve to whatever flow the current
+    // system pressure allows, dumping the excess into the tank until cut-out.
+    if(pumpOn){
+      Qpump = pumpFlowAtPressure(Pd);                  // operating point on pump curve
+      Qnet = Qpump - solveDemand(A, Pd).Q;
+      Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+      if(Vair >= VairEmpty - 1e-6){ Pd = Pd + (Pnat-Pd)*Math.min(1,dtMin*8); regime="no-CSV overrun"; }
+      else { Pd = pFromVair(Vair); regime="no-CSV pumping"; }
     } else {
-      Pd = pFromVair(Vair);
+      regime = params.power ? "no-CSV off" : "powered down";
+      Qpump = 0; Qnet = -solveDemand(A, Pd).Q;
+      Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+      if(Vair >= VairEmpty - 1e-6){
+        if(solveDemand(A,Pd).Q > 0.001) regime = "tank empty";
+        Pd = Math.max(0, Pd * (1 - Math.min(1, 18*dtMin)));
+      } else Pd = pFromVair(Vair);
     }
-    Qdem = sprinklerDemand(A, Pd);
   }
 
-  // pressure switch (hysteresis = the 40/60 band)
+  // pressure switch (hysteresis = the cut-in/cut-out band) — identical in both modes
+  const wasOn = pumpOn;
   if(params.power){
     if(Pd >= cout) pumpOn = false;
     else if(Pd <= cin) pumpOn = true;
   }
+  // cycle tracking: log pump starts, derive cycles/hour from recent intervals
+  if(pumpOn && !wasOn){ S.starts.push(S.t); if(S.starts.length>8) S.starts.shift(); }
+  if(S.starts.length>=2){
+    const span = S.t - S.starts[0];
+    S.cyclesPerHr = span>0 ? (S.starts.length-1)/span*60 : 0;
+  }
+  if(!S.starts.length || (S.t - S.starts[S.starts.length-1]) > 20) S.cyclesPerHr = 0; // gone continuous
 
-  // derived readouts
-  const Pdisch = pumpOn ? pumpDischarge(Qpump) : 0;
-  const throttle = pumpOn ? clamp(1 - Qpump/PUMP_RUNOUT, 0, 1) : 0;  // 1=closed
+  // ---- final derived readouts from the settled system pressure ----
+  const dem = solveDemand(A, Math.max(0,Pd));
+  const Ppump  = pumpOn ? Math.max(0, pumpPsi(Qpump))      : 0;  // gross head, right at pump
+  const Pcsvin = pumpOn ? Math.max(0, pumpDischarge(Qpump)) : 0; // after riser = CSV inlet
+  const throttle = (pumpOn && params.csvEnabled) ? clamp(1 - Qpump/PUMP_RUNOUT, 0, 1) : 0;
 
   S.Pd=Pd; S.Vair=Vair; S.pumpOn=pumpOn;
-  S.Qpump=Qpump; S.Qdem=Qdem; S.Qnet=Qnet; S.regime=regime;
-  S.Pdisch=Math.max(0,Pdisch); S.throttle=throttle; S.BHP=pumpOn?pumpBHP(Qpump):0;
-  S.Pnat=Pnat;
+  S.Qpump=Qpump; S.Qdem=dem.Q; S.Qnet=Qpump-dem.Q; S.regime=regime;
+  S.Ppump=Ppump; S.Pcsvin=Pcsvin; S.Phead=dem.Phead;
+  S.throttle=throttle; S.BHP=pumpOn?pumpBHP(Qpump):0; S.Pnat=Pnat;
   S.t += dtMin;
   S.hist.push({t:S.t, Pd:Pd, on:pumpOn});
   if(S.hist.length>1600) S.hist.shift();
@@ -435,24 +478,36 @@ function drawSchematic(){
   g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
   g.fillText(S.BHP.toFixed(1)+' HP', X.pump, midY+80);
   // gauges right at the pump
-  drawGauge(g, X.pump-34, midY-150, 30, S.Pdisch, 180, 'psi', 'pump P', '#ffc24b');
+  drawGauge(g, X.pump-34, midY-150, 30, S.Ppump, 180, 'psi', 'pump P', '#ffc24b');
   drawGauge(g, X.pump+34, midY-150, 30, S.Qpump, 50, 'gpm', 'pump Q', '#39b7ff');
 
   // ---- CSV ----
-  g.fillStyle='#15273e'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.fill();
-  g.lineWidth=3; g.strokeStyle='#7c5cff'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.stroke();
-  // throttle plate
-  g.save(); g.translate(X.csv,midY);
-  const openAng = (1-S.throttle)*Math.PI*0.42;
-  g.strokeStyle='#b9a8ff'; g.lineWidth=5; g.lineCap='round';
-  g.beginPath(); g.moveTo(-18*Math.cos(openAng),-18*Math.sin(openAng));
-  g.lineTo(18*Math.cos(openAng),18*Math.sin(openAng)); g.stroke();
-  g.restore();
-  g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI';
-  g.fillText('CSV3A', X.csv, midY-44);
-  g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
-  g.fillText(S.pumpOn?(Math.round((1-S.throttle)*100)+'% open'):'—', X.csv, midY+48);
-  g.fillText('hold '+params.csv+' psi', X.csv, midY+62);
+  if(params.csvEnabled){
+    g.fillStyle='#15273e'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.fill();
+    g.lineWidth=3; g.strokeStyle='#7c5cff'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.stroke();
+    // throttle plate
+    g.save(); g.translate(X.csv,midY);
+    const openAng = (1-S.throttle)*Math.PI*0.42;
+    g.strokeStyle='#b9a8ff'; g.lineWidth=5; g.lineCap='round';
+    g.beginPath(); g.moveTo(-18*Math.cos(openAng),-18*Math.sin(openAng));
+    g.lineTo(18*Math.cos(openAng),18*Math.sin(openAng)); g.stroke();
+    g.restore();
+    g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI'; g.textAlign='center';
+    g.fillText('CSV3A', X.csv, midY-44);
+    g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+    g.fillText(S.pumpOn?(Math.round((1-S.throttle)*100)+'% open'):'—', X.csv, midY+48);
+    g.fillText('hold '+params.csv+' psi', X.csv, midY+62);
+    // CSV inlet pressure tag
+    g.fillStyle='#ffc24b'; g.font='10px Segoe UI';
+    g.fillText('in '+S.Pcsvin.toFixed(0)+' psi', X.csv, midY-36);
+  } else {
+    // CSV removed — straight-through union, greyed
+    g.strokeStyle='#33506f'; g.lineWidth=10; g.lineCap='round';
+    g.beginPath(); g.moveTo(X.csv-22,midY); g.lineTo(X.csv+22,midY); g.stroke();
+    g.fillStyle='#5a6e8c'; g.font='600 12px Segoe UI'; g.textAlign='center';
+    g.fillText('no CSV', X.csv, midY-44);
+    g.fillText('(removed)', X.csv, midY+58);
+  }
 
   // ---- pressure tank ----
   g.fillStyle='#13283f'; roundRect(g, X.tank-38, midY+40, 76, 120, 12); g.fill();
@@ -478,10 +533,10 @@ function drawSchematic(){
     const hx = X.spr-36 + (heads>1? i*(72/(heads-1)) : 36);
     g.strokeStyle='#5a6e8c'; g.lineWidth=3;
     g.beginPath(); g.moveTo(hx,midY-6); g.lineTo(hx,midY-22); g.stroke();
-    // spray arcs ∝ pressure
+    // spray arcs ∝ head pressure
     if(S.Qdem>0.05 && params.N>0){
-      const reach = clamp(S.Pd/45,0.2,1.4)*22;
-      g.strokeStyle='rgba(127,212,255,'+clamp(S.Pd/50,0.2,0.9)+')';
+      const reach = clamp(S.Phead/45,0.2,1.4)*22;
+      g.strokeStyle='rgba(127,212,255,'+clamp(S.Phead/50,0.2,0.9)+')';
       g.lineWidth=2;
       for(let s=-2;s<=2;s++){
         g.beginPath();
@@ -497,13 +552,22 @@ function drawSchematic(){
   g.fillText('SPRINKLERS', X.spr, midY+30);
   g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
   g.fillText(params.N+' heads', X.spr, midY+46);
-  drawGauge(g, X.spr-34, midY-150, 30, S.Pd, 80, 'psi', 'head P', pressColor(S.Pd));
+  const elevLbl = params.elev===0 ? 'at pump level' : (params.elev>0?'+'+params.elev+' ft above':params.elev+' ft below');
+  g.fillStyle = params.elev===0?'#9fb3cd':(params.elev>0?'#ffd281':'#7ee0a4');
+  g.fillText(elevLbl, X.spr, midY+62);
+  drawGauge(g, X.spr-34, midY-150, 30, S.Phead, 80, 'psi', 'head P', headColor(S.Phead));
   drawGauge(g, X.spr+34, midY-150, 30, S.Qdem, 50, 'gpm', 'zone Q', '#39b7ff');
 }
 
 function pressColor(p){
   if(p < params.cin-3) return '#ff5d6c';
   if(p > params.cout+3) return '#ff5d6c';
+  return '#3ddc84';
+}
+// sprinkler head pressure quality: too low = poor coverage, too high = misting
+function headColor(p){
+  if(p < 15 || p > 65) return '#ff5d6c';
+  if(p < 25 || p > 50) return '#ffc24b';
   return '#3ddc84';
 }
 function roundRect(g,x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y);
@@ -646,19 +710,33 @@ function drawCsvCurve(){
   if(QregMax<Qm-3){ g.fillStyle='#ff8b96'; g.fillText('overdrive', X((QregMax+Qm)/2), T+11); }
   g.fillStyle='#9fdcff'; g.textAlign='left'; g.fillText('outlet '+setp+' psi', X(CSV_MIN)+4, Y(setp)-4);
   g.fillStyle='#ffc24b'; g.textAlign='center'; g.fillText('inlet = pump discharge', X(26), Y(pumpDischarge(26))-6);
+  // 125 psi max-differential limit: line at inlet = setpoint + 125 (low-flow end)
+  const pLimit = setp + CSV_DIFF_MAX;
+  if(pLimit < Pm){
+    g.strokeStyle='#ff5d6c88'; g.lineWidth=1; g.setLineDash([5,4]);
+    g.beginPath(); g.moveTo(L,Y(pLimit)); g.lineTo(W-R,Y(pLimit)); g.stroke(); g.setLineDash([]);
+    g.fillStyle='#ff8b96'; g.font='9px Segoe UI'; g.textAlign='right';
+    g.fillText('max Δ '+CSV_DIFF_MAX+' psi', W-R-2, Y(pLimit)-3);
+  }
   // live operating point: inlet & outlet + throttle gap
   if(S.pumpOn){
     const q=clamp(S.Qpump,0,Qm), pin=Math.max(0,pumpDischarge(q)), pout=clamp(S.Pd,0,Pm);
-    const ox=X(q);
-    // throttle-drop connector
-    g.strokeStyle='#ffffff44'; g.lineWidth=6; g.lineCap='round';
+    const ox=X(q), overDiff=(pin-setp)>CSV_DIFF_MAX;
+    // throttle-drop connector (red if over the differential limit)
+    g.strokeStyle=overDiff?'#ff5d6c99':'#ffffff44'; g.lineWidth=6; g.lineCap='round';
     g.beginPath(); g.moveTo(ox,Y(pin)); g.lineTo(ox,Y(pout)); g.stroke();
-    // inlet point
     g.fillStyle='#ffc24b'; g.strokeStyle='#fff'; g.lineWidth=1.5; circle(g,ox,Y(pin),5); g.fill(); g.stroke();
-    // outlet point
     const reg = q>=CSV_MIN && q<=QregMax;
     g.fillStyle = reg?'#3ddc84':(q<CSV_MIN?'#ffc24b':'#ff5d6c');
     g.strokeStyle='#fff'; g.lineWidth=2; circle(g,ox,Y(pout),6); g.fill(); g.stroke();
+  }
+  // CSV removed overlay
+  if(!params.csvEnabled){
+    g.fillStyle='rgba(11,20,34,0.74)'; g.fillRect(0,0,W,H);
+    g.fillStyle='#9fb3cd'; g.font='600 15px Segoe UI'; g.textAlign='center';
+    g.fillText('CSV removed', W/2, H/2-8);
+    g.font='11px Segoe UI'; g.fillStyle='#7a8ba5';
+    g.fillText('conventional system — pump cycles 40/60 (see pressure chart)', W/2, H/2+12);
   }
 }
 
@@ -673,8 +751,16 @@ bind('cin', e=>{ params.cin=+e.value; enforceOrder(); });
 bind('cout', e=>{ params.cout=+e.value; enforceOrder(); });
 bind('tank', e=>{ params.Vtank=+e.value; });
 bind('speed', e=>{ params.speed=+e.value; document.getElementById('vSpeed').textContent=e.value; });
+bind('elev', e=>{ params.elev=+e.value;
+  document.getElementById('vElev').textContent=(e.value>0?'+':'')+e.value+' ft'; });
 document.getElementById('pumpPower').addEventListener('click', function(){
   params.power=!params.power; this.classList.toggle('on',params.power);
+});
+document.getElementById('csvToggle').addEventListener('click', function(){
+  params.csvEnabled=!params.csvEnabled; this.classList.toggle('on',params.csvEnabled);
+  this.querySelector('div:last-child').textContent =
+    params.csvEnabled?'Cycle Stop Valve installed':'Cycle Stop Valve removed';
+  S.starts=[]; S.cyclesPerHr=0;   // reset cycle stats on mode change
 });
 document.getElementById('reset').addEventListener('click', resetSim);
 
@@ -694,21 +780,37 @@ function enforceOrder(){
 }
 
 function updateText(){
+  const cyc = S.cyclesPerHr;
+  const cycCol = cyc>30?'var(--red)':cyc>10?'var(--amber)':'var(--green)';
   const sb=document.getElementById('statebar');
   sb.innerHTML =
     `<span>state <b>${S.regime}</b></span>`+
-    `<span>pump P <b>${S.Pdisch.toFixed(0)}</b> psi</span>`+
+    `<span>pump P <b>${S.Ppump.toFixed(0)}</b> psi</span>`+
+    `<span>CSV in <b>${S.Pcsvin.toFixed(0)}</b> psi</span>`+
     `<span>pump Q <b>${S.Qpump.toFixed(1)}</b> gpm</span>`+
     `<span>system P <b>${S.Pd.toFixed(1)}</b> psi</span>`+
+    `<span>head P <b>${S.Phead.toFixed(1)}</b> psi</span>`+
     `<span>zone Q <b>${S.Qdem.toFixed(1)}</b> gpm</span>`+
-    `<span>tank <b>${(params.Vtank-S.Vair).toFixed(1)}</b> gal</span>`;
+    `<span>tank <b>${(params.Vtank-S.Vair).toFixed(1)}</b> gal</span>`+
+    `<span>cycles/hr <b style="color:${cycCol}">${cyc<0.5?'0':cyc.toFixed(0)}</b></span>`;
   let msg='';
-  const A=params.N*params.K, Qset=sprinklerDemand(A,params.csv);
-  if(!params.power) msg='Pump powered down — tank drains to demand, then sits empty.';
-  else if(S.regime==='regulating') msg=`Active demand ${Qset.toFixed(1)} gpm ≥ 5 gpm bypass. CSV throttles the pump up its curve (pump reads ${S.Pdisch.toFixed(0)} psi) to hold the system at ${params.csv} psi. <b>Pump runs continuously — no cycling.</b>`;
-  else if(S.regime==='bypass-fill') msg=`Demand ${Qset.toFixed(1)} gpm is below the 5 gpm CSV minimum. The bypass over-fills the tank toward cut-out; the pump will shut off at ${params.cout} psi, then slowly cycle. <span class="warn">This residual cycling at near-zero demand is expected CSV behavior.</span>`;
-  else if(S.regime==='overdrive') msg=`Demand exceeds what the pump can deliver at ${params.csv} psi. CSV is wide open, can't regulate — system pressure falls to ~${S.Pnat.toFixed(0)} psi and the pump runs flat out. Reduce heads to restore regulation.`;
+  const A=params.N*params.K;
+  const shortCyc = cyc>30 ? ` <span style="color:var(--red)">⚠ ${cyc.toFixed(0)} starts/hr — short-cycling, hard on the motor.</span>` : '';
+  if(!params.power) msg='Pump powered down — tank drains to demand, then collapses to zero once empty.';
+  else if(!params.csvEnabled){
+    if(S.pumpOn)
+      msg=`<b>No CSV:</b> unregulated pump runs flat-out at <b>${S.Qpump.toFixed(0)} gpm</b> (vs ${S.Qdem.toFixed(0)} gpm demand), filling the tank to cut-out then shutting off. System pressure saws between ${params.cin}–${params.cout} psi.${shortCyc||' Use a bigger tank to slow the cycling.'}`;
+    else if(S.regime==='tank empty') msg=`No CSV — tank empty, pump off, no water reaching the heads.`;
+    else msg=`No CSV — pump off, tank drawing down toward cut-in (${params.cin} psi), where it restarts.${shortCyc}`;
+  }
+  else if(S.regime==='regulating') msg=`Active demand ${S.Qdem.toFixed(1)} gpm ≥ 5 gpm bypass. CSV throttles the pump up its curve (pump reads ${S.Ppump.toFixed(0)} psi) to hold the system at ${params.csv} psi. <b>Pump runs continuously — no cycling.</b>`;
+  else if(S.regime==='pressurizing') msg=`Pressurizing: pump pushing ${S.Qpump.toFixed(0)} gpm to bring the system up to the ${params.csv} psi setpoint.`;
+  else if(S.regime==='bypass-fill') msg=`Demand below the 5 gpm CSV minimum. The bypass over-fills the tank toward cut-out; the pump shuts off at ${params.cout} psi, then slowly cycles.${shortCyc||' <span class="warn">Slow cycling at near-zero demand is expected CSV behavior.</span>'}`;
+  else if(S.regime==='overdrive') msg=`Demand exceeds what the pump can deliver at ${params.csv} psi. CSV is wide open, can't regulate — system pressure falls to ~${S.Pd.toFixed(0)} psi and the pump runs flat out. Reduce heads to restore regulation.`;
   else if(S.regime==='pump off') msg=`Pump off. Tank drawdown supplies demand; pressure falls toward cut-in (${params.cin} psi), where the pump restarts.`;
+  else if(S.regime==='tank empty') msg=`Tank empty and no pump inflow — pressure and flow have collapsed to zero.`;
+  // elevation footnote
+  if(params.elev!==0 && S.pumpOn) msg += ` <span class="badge">Heads ${params.elev>0?'+'+params.elev+' ft above':(-params.elev)+' ft below'} pump → ${Math.abs(params.elev*PSI_PER_FT).toFixed(0)} psi ${params.elev>0?'lost lifting to':'gained dropping to'} the heads.</span>`;
   document.getElementById('explain').innerHTML=msg;
 
   // pump-curve note
@@ -720,17 +822,22 @@ function updateText(){
       : q>B_.runout ? '<span style="color:var(--red)">⚠ past runout — motor-overload risk</span>'
       : (q>=B_.porLo&&q<=B_.porHi) ? '<span style="color:var(--green)">in the preferred operating region (70–120% BEP)</span>'
       : '<span class="warn">in the allowable region (outside preferred)</span>';
-    pn=`Operating at <b>${q.toFixed(1)} gpm / ${S.Pdisch.toFixed(0)} psi</b> — ${zone}. `
-      + (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.');
+    pn=`Operating at <b>${q.toFixed(1)} gpm / ${S.Ppump.toFixed(0)} psi</b> — ${zone}. `
+      + (params.csvEnabled ? (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.')
+                           : 'No CSV: pump sits at the high-flow / low-pressure end and cycles.');
   }
   document.getElementById('pumpnote').innerHTML=pn;
 
   // csv note
+  const drop = Math.max(0, S.Pcsvin - params.csv);
   let cn;
-  if(!S.pumpOn) cn='Pump off — valve idle. Tank holds system pressure.';
-  else if(S.regime==='overdrive') cn=`<span style="color:var(--red)">Overdrive:</span> demand exceeds pump capacity at ${params.csv} psi, so the valve is wide open and can no longer hold the setpoint — outlet has dropped to ~${S.Pd.toFixed(0)} psi (follows the pump curve).`;
+  if(!params.csvEnabled) cn='<span style="color:var(--muted)">CSV removed.</span> Without pressure regulation the pump can only cycle on/off via the 40/60 switch — watch the cycles/hr and the sawtooth on the pressure chart. A bigger tank is the only way to slow the cycling.';
+  else if(!S.pumpOn) cn='Pump off — valve idle. Tank holds system pressure.';
+  else if(S.regime==='overdrive') cn=`<span style="color:var(--red)">Overdrive:</span> demand exceeds pump capacity at ${params.csv} psi, so the valve is wide open and can no longer hold the setpoint — outlet dropped to ~${S.Pd.toFixed(0)} psi (follows the pump curve).`;
   else if(q<CSV_MIN) cn=`Below the 5 gpm minimum — valve at min bypass, filling the tank. Outlet rides above setpoint toward cut-out.`;
-  else cn=`<span style="color:var(--green)">Regulating:</span> inlet <b>${S.Pdisch.toFixed(0)} psi</b> → outlet held at <b>${params.csv} psi</b>. The valve is absorbing <b>${Math.max(0,S.Pdisch-params.csv).toFixed(0)} psi</b> of throttling drop at ${q.toFixed(1)} gpm.`;
+  else { cn=`<span style="color:var(--green)">Regulating:</span> inlet <b>${S.Pcsvin.toFixed(0)} psi</b> → outlet held at <b>${params.csv} psi</b>. The valve is absorbing <b>${drop.toFixed(0)} psi</b> of throttling drop at ${q.toFixed(1)} gpm.`;
+    if(drop>CSV_DIFF_MAX) cn+=` <span style="color:var(--red)">⚠ exceeds the ${CSV_DIFF_MAX} psi single-valve differential limit.</span>`;
+  }
   document.getElementById('csvnote').innerHTML=cn;
 }
 
@@ -767,6 +874,13 @@ function selfTest(){
   approx(draw, 5.4, 0.6, 'WX-202 drawdown @40/60 ≈ 5.4 gal');
   // natural pressure with 0 heads = near shutoff-minus-lift
   approx(naturalPressure(0), 171.6, 1, 'no-load pressure ≈ shutoff − lift');
+  // elevation: +100 ft above pump removes ~43 psi of head pressure
+  params.elev=100; const dHi=solveDemand(2, 50);
+  params.elev=0;   const d0=solveDemand(2, 50);
+  approx(d0.Phead - dHi.Phead, 43.4, 4, '+100 ft elevation ≈ 43 psi less head pressure');
+  approx(43.35, 100*PSI_PER_FT, 0.1, '100 ft = 43.35 psi static head');
+  // pump-discharge (CSV inlet) is below gross pump head by lift+friction
+  approx(pumpPsi(20) - pumpDischarge(20), STATIC_LIFT_PSI + KF_PSI*400, 0.1, 'pump head − riser loss = CSV inlet');
 }
 
 //=================================================================
