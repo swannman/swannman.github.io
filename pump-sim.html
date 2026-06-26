@@ -308,13 +308,19 @@ function step(dtMin){
       Qdem  = sprinklerDemand(A, Pd);
     }
   } else {
-    // --- PUMP OFF: tank supplies demand, pressure decays ---
+    // --- PUMP OFF: tank drawdown supplies demand, pressure decays ---
     regime = params.power ? "pump off" : "powered down";
     Qpump = 0;
     Qdem = sprinklerDemand(A, Pd);
     Qnet = -Qdem;
     Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
-    Pd = pFromVair(Vair);
+    if(Vair >= VairEmpty - 1e-6){
+      // tank bladder empty + no pump = no water source -> pressure/flow collapse to 0
+      if(Qdem > 0.001) regime = "tank empty";
+      Pd = Math.max(0, Pd * (1 - Math.min(1, 18*dtMin)));   // rapid decay to zero
+    } else {
+      Pd = pFromVair(Vair);
+    }
     Qdem = sprinklerDemand(A, Pd);
   }
 
@@ -639,7 +645,7 @@ function drawCsvCurve(){
   g.fillStyle='#7ee0a4'; g.fillText('regulating', X((CSV_MIN+QregMax)/2), T+11);
   if(QregMax<Qm-3){ g.fillStyle='#ff8b96'; g.fillText('overdrive', X((QregMax+Qm)/2), T+11); }
   g.fillStyle='#9fdcff'; g.textAlign='left'; g.fillText('outlet '+setp+' psi', X(CSV_MIN)+4, Y(setp)-4);
-  g.fillStyle='#ffc24b'; g.fillText('inlet (pump)', X(2)+2, Y(pumpDischarge(2))-4);
+  g.fillStyle='#ffc24b'; g.textAlign='center'; g.fillText('inlet = pump discharge', X(26), Y(pumpDischarge(26))-6);
   // live operating point: inlet & outlet + throttle gap
   if(S.pumpOn){
     const q=clamp(S.Qpump,0,Qm), pin=Math.max(0,pumpDischarge(q)), pout=clamp(S.Pd,0,Pm);
