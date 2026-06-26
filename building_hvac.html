@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stack Effect Pressure Simulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+h1 {
+  text-align: center;
+  padding: 18px 0 6px;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #f0f0f0;
+  letter-spacing: 0.5px;
+}
+.subtitle {
+  text-align: center;
+  font-size: 0.85rem;
+  color: #888;
+  margin-bottom: 14px;
+}
+.app {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0 16px 24px;
+  justify-content: center;
+}
+.panel {
+  background: #16213e;
+  border-radius: 10px;
+  padding: 16px;
+  border: 1px solid #0f3460;
+}
+.panel h2 {
+  font-size: 0.95rem;
+  color: #aaa;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+
+/* Left column: building + chart */
+.viz-col {
+  display: flex;
+  gap: 0;
+  flex: 0 1 auto;
+}
+.building-panel {
+  flex: 0 0 auto;
+  padding-right: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+.chart-panel {
+  flex: 0 0 auto;
+  padding-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px dashed #0f3460;
+}
+canvas { display: block; }
+
+/* Right column: controls + vestibule + readouts */
+.right-col {
+  flex: 0 0 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.controls-panel { }
+.control-group {
+  margin-bottom: 14px;
+}
+.control-group label {
+  display: block;
+  font-size: 0.82rem;
+  color: #999;
+  margin-bottom: 4px;
+}
+.control-group .value {
+  font-size: 0.95rem;
+  color: #e0e0e0;
+  font-weight: 600;
+  float: right;
+}
+input[type="range"] {
+  width: 100%;
+  accent-color: #e94560;
+  cursor: pointer;
+}
+.floor-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.floor-controls button {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid #0f3460;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-size: 1.3rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.floor-controls button:hover {
+  background: #0f3460;
+}
+.floor-controls .floor-num {
+  font-size: 1.6rem;
+  font-weight: 700;
+  min-width: 40px;
+  text-align: center;
+}
+.presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.presets button {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid #0f3460;
+  background: #1a1a2e;
+  color: #ccc;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.presets button:hover, .presets button.active {
+  background: #0f3460;
+  color: #fff;
+}
+
+/* Readouts */
+.readouts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.readout {
+  background: #1a1a2e;
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+}
+.readout .label {
+  font-size: 0.72rem;
+  color: #888;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+.readout .val {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+.readout .unit {
+  font-size: 0.7rem;
+  color: #888;
+}
+.readout.warn .val { color: #e94560; }
+.readout.ok .val { color: #4ecca3; }
+
+.vestibule-panel canvas {
+  margin: 0 auto;
+}
+
+.hover-info {
+  font-size: 0.8rem;
+  color: #aaa;
+  text-align: center;
+  margin-top: 6px;
+  min-height: 1.2em;
+}
+</style>
+</head>
+<body>
+<h1>Stack Effect Pressure Simulator</h1>
+<p class="subtitle">Visualizing air pressure differentials in tall buildings due to thermal buoyancy</p>
+
+<div class="app">
+  <!-- Left: Building cross-section + pressure chart -->
+  <div class="viz-col panel" style="padding:0; display:flex; border:none; background:none;">
+    <div class="panel building-panel">
+      <h2>Building Cross-Section</h2>
+      <canvas id="buildingCanvas" width="360" height="520"></canvas>
+      <div class="hover-info" id="hoverInfo">Hover over the building to see pressure at that height</div>
+    </div>
+    <div class="panel chart-panel">
+      <h2>ΔP vs Height</h2>
+      <canvas id="chartCanvas" width="200" height="520"></canvas>
+    </div>
+  </div>
+
+  <!-- Right column -->
+  <div class="right-col">
+    <div class="panel controls-panel">
+      <h2>Controls</h2>
+
+      <div class="control-group">
+        <label>Number of Floors</label>
+        <div class="floor-controls">
+          <button id="floorMinus">−</button>
+          <span class="floor-num" id="floorNum">10</span>
+          <button id="floorPlus">+</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>Season Presets</label>
+        <div class="presets">
+          <button data-preset="coldWinter">Cold Winter</button>
+          <button data-preset="mildWinter" class="active">Mild Winter</button>
+          <button data-preset="spring">Spring/Fall</button>
+          <button data-preset="summer">Summer</button>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <label>Outside Temperature <span class="value" id="tempOutVal">32°F</span></label>
+        <input type="range" id="tempOut" min="-22" max="125" value="32" step="1">
+      </div>
+
+      <div class="control-group">
+        <label>Inside Temperature <span class="value" id="tempInVal">72°F</span></label>
+        <input type="range" id="tempIn" min="59" max="86" value="72" step="1">
+      </div>
+
+      <div class="control-group">
+        <label>HVAC Pressurization <span class="value" id="hvacVal">0 Pa</span></label>
+        <input type="range" id="hvacSlider" min="-75" max="75" value="0" step="1">
+      </div>
+
+      <div class="control-group">
+        <label>NPP Position <span class="value" id="nppVal">50%</span></label>
+        <input type="range" id="nppSlider" min="10" max="90" value="50" step="1">
+      </div>
+
+      <div class="control-group">
+        <label>Shaft Effect <span class="value" id="shaftVal">1.0×</span></label>
+        <input type="range" id="shaftSlider" min="5" max="20" value="10" step="1">
+      </div>
+
+      <div class="control-group">
+        <label>Door Closer Force <span class="value" id="closerVal">9 lbf</span></label>
+        <input type="range" id="closerSlider" min="5" max="25" value="9" step="1">
+      </div>
+    </div>
+
+    <div class="panel vestibule-panel">
+      <h2>Ground-Level Vestibule</h2>
+      <canvas id="vestibuleCanvas" width="308" height="200"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>Pressure &amp; Force Readouts</h2>
+      <div class="readouts" id="readouts"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- Constants ----
+const P_ATM = 101325;       // Pa
+const G = 9.81;              // m/s²
+const R_AIR = 287.058;       // J/(kg·K)
+const FLOOR_HEIGHT = 4.0;    // meters per floor
+const DOOR_W = 0.914;        // m (standard commercial door)
+const DOOR_H = 2.134;        // m
+const DOOR_AREA = DOOR_W * DOOR_H;
+const HANDLE_OFFSET = 0.075; // m from edge
+const ADA_LIMIT_N = 133;     // N (30 lbf)
+const N_TO_LBF = 0.224809;  // 1 N = 0.224809 lbf
+const ADA_LIMIT_LBF = 30;   // lbf
+
+// ---- State ----
+let state = {
+  floors: 10,
+  tempOut: 0,   // °C (internal)
+  tempIn: 22,   // °C (internal)
+  hvacOffset: 0,      // HVAC pressurization in Pa (negative = depressurized)
+  nppFraction: 0.5,   // NPP position as fraction of building height (0.1–0.9)
+  shaftFactor: 1.0,   // shaft effect multiplier (0.5–2.0)
+  closerForce: 40,    // door closer force in N
+};
+
+// Conversion helpers
+function cToF(c) { return c * 9/5 + 32; }
+function fToC(f) { return (f - 32) * 5/9; }
+function nToLbf(n) { return n * N_TO_LBF; }
+
+const presets = {
+  coldWinter: { tempOut: -20, tempIn: 22 },
+  mildWinter: { tempOut: 0, tempIn: 22 },
+  spring:     { tempOut: 15, tempIn: 22 },
+  summer:     { tempOut: 35, tempIn: 24 },
+};
+
+// ---- Physics ----
+function buildingHeight() {
+  return state.floors * FLOOR_HEIGHT;
+}
+
+function deltaP(h) {
+  const H = buildingHeight();
+  const T_out = state.tempOut + 273.15;
+  const T_in = state.tempIn + 273.15;
+  const stackCoeff = (P_ATM * G / R_AIR) * (1/T_out - 1/T_in);
+  const nppHeight = state.nppFraction * H;
+  return stackCoeff * (h - nppHeight) * state.shaftFactor + state.hvacOffset;
+}
+
+function doorForce(dp) {
+  const absDp = Math.abs(dp);
+  const d = HANDLE_OFFSET;
+  const W = DOOR_W;
+  return state.closerForce + (absDp * W * DOOR_AREA) / (2 * (W - d));
+}
+
+// ---- Canvas refs ----
+const buildingCanvas = document.getElementById('buildingCanvas');
+const chartCanvas = document.getElementById('chartCanvas');
+const vestibuleCanvas = document.getElementById('vestibuleCanvas');
+const bCtx = buildingCanvas.getContext('2d');
+const cCtx = chartCanvas.getContext('2d');
+const vCtx = vestibuleCanvas.getContext('2d');
+
+// ---- Drawing helpers ----
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function pressureColor(dp, maxDp) {
+  if (maxDp === 0) return 'rgba(128,128,128,0.3)';
+  const t = Math.min(Math.abs(dp) / maxDp, 1);
+  if (dp < 0) {
+    // Inside < outside → inward pressure → blue
+    const r = Math.round(lerp(30, 40, t));
+    const g = Math.round(lerp(40, 100, t));
+    const b = Math.round(lerp(80, 220, t));
+    return `rgba(${r},${g},${b},${0.15 + t * 0.45})`;
+  } else {
+    // Inside > outside → outward pressure → red/orange
+    const r = Math.round(lerp(80, 230, t));
+    const g = Math.round(lerp(40, 70, t));
+    const b = Math.round(lerp(30, 40, t));
+    return `rgba(${r},${g},${b},${0.15 + t * 0.45})`;
+  }
+}
+
+// ---- Draw Building ----
+function drawBuilding() {
+  const W = buildingCanvas.width, H_canvas = buildingCanvas.height;
+  bCtx.clearRect(0, 0, W, H_canvas);
+
+  const margin = { top: 30, bottom: 50, left: 30, right: 30 };
+  const bldgW = W - margin.left - margin.right;
+  const bldgH = H_canvas - margin.top - margin.bottom;
+  const bldgX = margin.left;
+  const bldgY = margin.top;
+
+  const H = buildingHeight();
+  const maxDp = Math.max(Math.abs(deltaP(0)), Math.abs(deltaP(H)), 1);
+
+  // Pressure gradient fill
+  const slices = 100;
+  for (let i = 0; i < slices; i++) {
+    const y0 = bldgY + (i / slices) * bldgH;
+    const y1 = bldgY + ((i + 1) / slices) * bldgH;
+    const h = H * (1 - (i + 0.5) / slices); // height from ground
+    const dp = deltaP(h);
+    bCtx.fillStyle = pressureColor(dp, maxDp);
+    bCtx.fillRect(bldgX, y0, bldgW, y1 - y0 + 1);
+  }
+
+  // Building outline
+  bCtx.strokeStyle = '#4a6fa5';
+  bCtx.lineWidth = 2;
+  bCtx.strokeRect(bldgX, bldgY, bldgW, bldgH);
+
+  // Central core
+  const coreW = bldgW * 0.18;
+  const coreX = bldgX + (bldgW - coreW) / 2;
+  bCtx.fillStyle = 'rgba(100,100,140,0.25)';
+  bCtx.fillRect(coreX, bldgY, coreW, bldgH);
+  bCtx.strokeStyle = '#4a6fa577';
+  bCtx.lineWidth = 1;
+  bCtx.strokeRect(coreX, bldgY, coreW, bldgH);
+
+  // Floor lines
+  bCtx.strokeStyle = '#4a6fa544';
+  bCtx.lineWidth = 1;
+  for (let f = 1; f <= state.floors; f++) {
+    const y = bldgY + bldgH - (f / state.floors) * bldgH;
+    bCtx.beginPath();
+    bCtx.moveTo(bldgX, y);
+    bCtx.lineTo(bldgX + bldgW, y);
+    bCtx.stroke();
+  }
+
+  // Floor labels
+  bCtx.font = '10px Segoe UI';
+  bCtx.fillStyle = '#777';
+  bCtx.textAlign = 'right';
+  for (let f = 0; f <= state.floors; f++) {
+    const y = bldgY + bldgH - (f / state.floors) * bldgH;
+    if (f === 0) {
+      bCtx.fillText('GF', bldgX - 4, y + 3);
+    } else if (f === state.floors) {
+      bCtx.fillText('Roof', bldgX - 4, y + 3);
+    } else if (state.floors <= 15 || f % 2 === 0) {
+      bCtx.fillText(`F${f}`, bldgX - 4, y + 3);
+    }
+  }
+
+  // NPP line
+  const nppY = bldgY + bldgH * (1 - state.nppFraction);
+  bCtx.strokeStyle = '#f0c040';
+  bCtx.lineWidth = 1.5;
+  bCtx.setLineDash([6, 4]);
+  bCtx.beginPath();
+  bCtx.moveTo(bldgX, nppY);
+  bCtx.lineTo(bldgX + bldgW, nppY);
+  bCtx.stroke();
+  bCtx.setLineDash([]);
+  bCtx.font = '11px Segoe UI';
+  bCtx.fillStyle = '#f0c040';
+  bCtx.textAlign = 'left';
+  bCtx.fillText('NPP', bldgX + bldgW + 4, nppY + 4);
+
+  // Airflow arrows
+  drawAirflowArrows(bldgX, bldgY, bldgW, bldgH, maxDp);
+
+  // Vestibule indicator at ground level
+  const vestW = bldgW * 0.25;
+  const vestH = 16;
+  const vestX = bldgX + (bldgW - vestW) / 2;
+  const vestY = bldgY + bldgH - 2;
+  bCtx.fillStyle = 'rgba(78, 204, 163, 0.2)';
+  bCtx.fillRect(vestX, vestY, vestW, vestH);
+  bCtx.strokeStyle = '#4ecca3';
+  bCtx.lineWidth = 1;
+  bCtx.strokeRect(vestX, vestY, vestW, vestH);
+  bCtx.font = '9px Segoe UI';
+  bCtx.fillStyle = '#4ecca3';
+  bCtx.textAlign = 'center';
+  bCtx.fillText('Vestibule', vestX + vestW/2, vestY + vestH + 11);
+
+  // Ground label
+  bCtx.font = '10px Segoe UI';
+  bCtx.fillStyle = '#666';
+  bCtx.textAlign = 'center';
+  bCtx.fillText('Ground Level', bldgX + bldgW/2, bldgY + bldgH + 36);
+
+  // Height scale on right
+  bCtx.textAlign = 'left';
+  bCtx.fillStyle = '#666';
+  bCtx.font = '9px Segoe UI';
+  const heightSteps = Math.min(state.floors, 10);
+  for (let i = 0; i <= heightSteps; i++) {
+    const frac = i / heightSteps;
+    const y = bldgY + bldgH - frac * bldgH;
+    const h = frac * H;
+    bCtx.fillText(`${h.toFixed(0)}m`, bldgX + bldgW + 4, y + 3);
+  }
+}
+
+function drawAirflowArrows(bldgX, bldgY, bldgW, bldgH, maxDp) {
+  const H = buildingHeight();
+  const arrowPositions = [0.15, 0.3, 0.7, 0.85];
+
+  for (const frac of arrowPositions) {
+    const h = frac * H;
+    const dp = deltaP(h);
+    const y = bldgY + bldgH - frac * bldgH;
+    const strength = Math.min(Math.abs(dp) / maxDp, 1);
+    if (strength < 0.02) continue;
+
+    const arrowLen = 12 + strength * 20;
+    const alpha = 0.3 + strength * 0.6;
+
+    // Left side arrows
+    const leftX = bldgX;
+    // Right side arrows
+    const rightX = bldgX + bldgW;
+
+    if (dp < 0) {
+      // Inward flow (winter ground level)
+      bCtx.strokeStyle = `rgba(100,160,255,${alpha})`;
+      bCtx.fillStyle = `rgba(100,160,255,${alpha})`;
+      drawArrow(bCtx, leftX - arrowLen - 4, y, leftX - 4, y, 5);
+      drawArrow(bCtx, rightX + arrowLen + 4, y, rightX + 4, y, 5);
+    } else {
+      // Outward flow (winter top)
+      bCtx.strokeStyle = `rgba(255,120,80,${alpha})`;
+      bCtx.fillStyle = `rgba(255,120,80,${alpha})`;
+      drawArrow(bCtx, leftX + 4, y, leftX - arrowLen - 4, y, 5);
+      drawArrow(bCtx, rightX - 4, y, rightX + arrowLen + 4, y, 5);
+    }
+  }
+}
+
+function drawArrow(ctx, x1, y1, x2, y2, headSize) {
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - headSize * Math.cos(angle - 0.5), y2 - headSize * Math.sin(angle - 0.5));
+  ctx.lineTo(x2 - headSize * Math.cos(angle + 0.5), y2 - headSize * Math.sin(angle + 0.5));
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ---- Draw Pressure Chart ----
+function drawChart() {
+  const W = chartCanvas.width, Hc = chartCanvas.height;
+  cCtx.clearRect(0, 0, W, Hc);
+
+  const margin = { top: 30, bottom: 50, left: 50, right: 20 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = Hc - margin.top - margin.bottom;
+  const plotX = margin.left;
+  const plotY = margin.top;
+
+  const H = buildingHeight();
+  const dpGround = deltaP(0);
+  const dpRoof = deltaP(H);
+  const maxAbsDp = Math.max(Math.abs(dpGround), Math.abs(dpRoof), 1);
+  const dpRange = maxAbsDp * 1.2;
+
+  // Background
+  cCtx.fillStyle = '#0d1b30';
+  cCtx.fillRect(plotX, plotY, plotW, plotH);
+
+  // Shaded regions
+  const steps = 80;
+  for (let i = 0; i < steps; i++) {
+    const frac = (i + 0.5) / steps;
+    const h = frac * H;
+    const dp = deltaP(h);
+    const y = plotY + plotH - frac * plotH;
+    const sliceH = plotH / steps;
+    const centerX = plotX + plotW / 2;
+    const dpX = (dp / dpRange) * (plotW / 2);
+
+    if (dp < 0) {
+      cCtx.fillStyle = 'rgba(60,120,220,0.2)';
+    } else {
+      cCtx.fillStyle = 'rgba(220,80,60,0.2)';
+    }
+    cCtx.fillRect(Math.min(centerX, centerX + dpX), y - sliceH/2, Math.abs(dpX), sliceH + 1);
+  }
+
+  // Axes
+  cCtx.strokeStyle = '#4a6fa5';
+  cCtx.lineWidth = 1;
+  // Vertical axis (zero line)
+  const zeroX = plotX + plotW / 2;
+  cCtx.beginPath();
+  cCtx.moveTo(zeroX, plotY);
+  cCtx.lineTo(zeroX, plotY + plotH);
+  cCtx.stroke();
+  // Horizontal axis at bottom
+  cCtx.beginPath();
+  cCtx.moveTo(plotX, plotY + plotH);
+  cCtx.lineTo(plotX + plotW, plotY + plotH);
+  cCtx.stroke();
+
+  // Pressure curve
+  cCtx.strokeStyle = '#e0e0e0';
+  cCtx.lineWidth = 2;
+  cCtx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const frac = i / steps;
+    const h = frac * H;
+    const dp = deltaP(h);
+    const x = zeroX + (dp / dpRange) * (plotW / 2);
+    const y = plotY + plotH - frac * plotH;
+    if (i === 0) cCtx.moveTo(x, y);
+    else cCtx.lineTo(x, y);
+  }
+  cCtx.stroke();
+
+  // NPP marker
+  const nppY = plotY + plotH * (1 - state.nppFraction);
+  cCtx.strokeStyle = '#f0c04088';
+  cCtx.lineWidth = 1;
+  cCtx.setLineDash([4, 3]);
+  cCtx.beginPath();
+  cCtx.moveTo(plotX, nppY);
+  cCtx.lineTo(plotX + plotW, nppY);
+  cCtx.stroke();
+  cCtx.setLineDash([]);
+
+  // Axis labels
+  cCtx.font = '9px Segoe UI';
+  cCtx.fillStyle = '#888';
+  cCtx.textAlign = 'center';
+  cCtx.fillText('0', zeroX, plotY + plotH + 12);
+  const dpLabel = dpRange.toFixed(0);
+  cCtx.fillText(`-${dpLabel}`, plotX + 5, plotY + plotH + 12);
+  cCtx.fillText(`+${dpLabel}`, plotX + plotW - 5, plotY + plotH + 12);
+  cCtx.fillText('ΔP (Pa)', zeroX, plotY + plotH + 28);
+
+  // Labels for negative = inward, positive = outward
+  cCtx.font = '8px Segoe UI';
+  cCtx.fillStyle = '#6090d0';
+  cCtx.fillText('In > Out', plotX + plotW * 0.22, plotY + plotH + 40);
+  cCtx.fillStyle = '#d06040';
+  cCtx.fillText('In < Out', plotX + plotW * 0.78, plotY + plotH + 40);
+
+  // Ground / Roof ΔP value labels
+  cCtx.font = '10px Segoe UI';
+  cCtx.fillStyle = '#ccc';
+  cCtx.textAlign = 'left';
+  const dpGroundX = zeroX + (dpGround / dpRange) * (plotW / 2);
+  const dpRoofX = zeroX + (dpRoof / dpRange) * (plotW / 2);
+  cCtx.fillText(`${dpGround.toFixed(1)} Pa`, dpGroundX + 6, plotY + plotH - 6);
+  cCtx.fillText(`${dpRoof.toFixed(1)} Pa`, dpRoofX + 6, plotY + 14);
+}
+
+// ---- Draw Vestibule ----
+function drawVestibule() {
+  const W = vestibuleCanvas.width, Hv = vestibuleCanvas.height;
+  vCtx.clearRect(0, 0, W, Hv);
+
+  const dpGround = deltaP(0);
+  const dpVest = dpGround / 2; // vestibule at average pressure
+
+  const outsideX = 20, vestX = 100, insideX = 210, endX = W - 20;
+  const wallY1 = 40, wallY2 = 160;
+  const doorGap = 20;
+  const midY = (wallY1 + wallY2) / 2;
+
+  // Zone labels
+  vCtx.font = '11px Segoe UI';
+  vCtx.textAlign = 'center';
+  vCtx.fillStyle = '#aaa';
+  vCtx.fillText('Outside', (outsideX + vestX) / 2, 28);
+  vCtx.fillText('Vestibule', (vestX + insideX) / 2, 28);
+  vCtx.fillText('Inside', (insideX + endX) / 2, 28);
+
+  // Zone fills
+  // Outside
+  vCtx.fillStyle = 'rgba(80,140,220,0.08)';
+  vCtx.fillRect(outsideX, wallY1, vestX - outsideX, wallY2 - wallY1);
+  // Vestibule
+  vCtx.fillStyle = 'rgba(78,204,163,0.1)';
+  vCtx.fillRect(vestX, wallY1, insideX - vestX, wallY2 - wallY1);
+  // Inside
+  const insideColor = dpGround < 0 ? 'rgba(80,140,220,0.08)' : 'rgba(220,100,60,0.08)';
+  vCtx.fillStyle = insideColor;
+  vCtx.fillRect(insideX, wallY1, endX - insideX, wallY2 - wallY1);
+
+  // Walls
+  vCtx.strokeStyle = '#4a6fa5';
+  vCtx.lineWidth = 2;
+  // Outer wall with door gap
+  drawWallWithDoor(vCtx, vestX, wallY1, wallY2, midY, doorGap);
+  // Inner wall with door gap
+  drawWallWithDoor(vCtx, insideX, wallY1, wallY2, midY, doorGap);
+
+  // Door panels (angled to show which way they open)
+  const doorLen = doorGap * 0.9;
+  const extDoorAngle = dpGround < 0 ? -0.5 : 0.3;
+  const intDoorAngle = dpGround < 0 ? 0.5 : -0.3;
+
+  // Exterior door
+  vCtx.strokeStyle = '#e94560';
+  vCtx.lineWidth = 3;
+  vCtx.beginPath();
+  vCtx.moveTo(vestX, midY - doorGap/2);
+  vCtx.lineTo(vestX + doorLen * Math.cos(extDoorAngle), midY - doorGap/2 + doorLen * Math.sin(extDoorAngle));
+  vCtx.stroke();
+
+  // Interior door
+  vCtx.beginPath();
+  vCtx.moveTo(insideX, midY - doorGap/2);
+  vCtx.lineTo(insideX + doorLen * Math.cos(intDoorAngle), midY - doorGap/2 + doorLen * Math.sin(intDoorAngle));
+  vCtx.stroke();
+
+  // Pressure values
+  vCtx.font = '10px Segoe UI';
+  vCtx.textAlign = 'center';
+  vCtx.fillStyle = '#888';
+  vCtx.fillText('P = 0 (ref)', (outsideX + vestX) / 2, midY + 4);
+  vCtx.fillStyle = '#4ecca3';
+  vCtx.fillText(`P = ${(dpGround/2).toFixed(1)} Pa`, (vestX + insideX) / 2, midY + 4);
+  vCtx.fillStyle = dpGround < 0 ? '#6090d0' : '#d06040';
+  vCtx.fillText(`P = ${dpGround.toFixed(1)} Pa`, (insideX + endX) / 2, midY + 4);
+
+  // ΔP labels across doors
+  const dpAcrossExt = Math.abs(dpVest);
+  const dpAcrossInt = Math.abs(dpGround - dpVest);
+  const dpNoDoor = Math.abs(dpGround);
+
+  vCtx.font = '9px Segoe UI';
+  vCtx.fillStyle = '#e94560';
+  vCtx.fillText(`ΔP = ${dpAcrossExt.toFixed(1)} Pa`, vestX, wallY2 + 16);
+  vCtx.fillText(`ΔP = ${dpAcrossInt.toFixed(1)} Pa`, insideX, wallY2 + 16);
+
+  // Force arrows on doors
+  const forceExt = doorForce(dpAcrossExt);
+  const forceInt = doorForce(dpAcrossInt);
+  const forceNo = doorForce(dpNoDoor);
+
+  const forceExtLbf = nToLbf(forceExt);
+  const forceIntLbf = nToLbf(forceInt);
+  const forceNoLbf = nToLbf(forceNo);
+
+  vCtx.font = 'bold 10px Segoe UI';
+  vCtx.fillStyle = forceExtLbf > ADA_LIMIT_LBF ? '#e94560' : '#4ecca3';
+  vCtx.fillText(`F = ${forceExtLbf.toFixed(1)} lbf`, vestX, wallY2 + 30);
+  vCtx.fillStyle = forceIntLbf > ADA_LIMIT_LBF ? '#e94560' : '#4ecca3';
+  vCtx.fillText(`F = ${forceIntLbf.toFixed(1)} lbf`, insideX, wallY2 + 30);
+
+  // "Without vestibule" comparison
+  vCtx.font = '9px Segoe UI';
+  vCtx.fillStyle = '#888';
+  vCtx.textAlign = 'left';
+  vCtx.fillText(`Without vestibule: ΔP = ${dpNoDoor.toFixed(1)} Pa, F = ${forceNoLbf.toFixed(1)} lbf`, outsideX, wallY2 + 48);
+}
+
+function drawWallWithDoor(ctx, x, y1, y2, midY, gap) {
+  ctx.beginPath();
+  ctx.moveTo(x, y1);
+  ctx.lineTo(x, midY - gap/2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x, midY + gap/2);
+  ctx.lineTo(x, y2);
+  ctx.stroke();
+}
+
+// ---- Readouts ----
+function updateReadouts() {
+  const H = buildingHeight();
+  const dpGround = deltaP(0);
+  const dpRoof = deltaP(H);
+  const dpVest = dpGround / 2;
+
+  const forceNoVest = doorForce(dpGround);
+  const forceExtVest = doorForce(dpVest);
+  const forceIntVest = doorForce(dpGround - dpVest);
+  const maxForceVest = Math.max(forceExtVest, forceIntVest);
+
+  const forceNoVestLbf = nToLbf(forceNoVest);
+  const maxForceVestLbf = nToLbf(maxForceVest);
+  const heightFt = (H * 3.28084).toFixed(0);
+
+  const readoutsEl = document.getElementById('readouts');
+  const items = [
+    { label: 'ΔP at Ground', val: `${dpGround.toFixed(1)}`, unit: 'Pa', warn: false },
+    { label: 'ΔP at Roof', val: `${dpRoof.toFixed(1)}`, unit: 'Pa', warn: false },
+    { label: 'Force (No Vest.)', val: `${forceNoVestLbf.toFixed(1)}`, unit: 'lbf', warn: forceNoVestLbf > ADA_LIMIT_LBF },
+    { label: 'Force (Vestibule)', val: `${maxForceVestLbf.toFixed(1)}`, unit: 'lbf', warn: maxForceVestLbf > ADA_LIMIT_LBF },
+    { label: 'Building Height', val: `${H.toFixed(0)}m / ${heightFt}`, unit: 'ft', warn: false },
+    { label: 'ADA Limit (30 lbf)', val: forceNoVestLbf > ADA_LIMIT_LBF ? 'EXCEEDS' : 'OK', unit: '', warn: forceNoVestLbf > ADA_LIMIT_LBF },
+  ];
+
+  readoutsEl.innerHTML = items.map(item => {
+    const cls = item.warn ? 'warn' : (item.val === 'OK' ? 'ok' : '');
+    return `<div class="readout ${cls}">
+      <div class="label">${item.label}</div>
+      <div class="val">${item.val} <span class="unit">${item.unit}</span></div>
+    </div>`;
+  }).join('');
+}
+
+// ---- Hover interaction ----
+let hoverHeight = null;
+
+buildingCanvas.addEventListener('mousemove', (e) => {
+  const rect = buildingCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const margin = { top: 30, bottom: 50, left: 30, right: 30 };
+  const bldgX = margin.left;
+  const bldgY = margin.top;
+  const bldgW = buildingCanvas.width - margin.left - margin.right;
+  const bldgH = buildingCanvas.height - margin.top - margin.bottom;
+
+  if (x >= bldgX && x <= bldgX + bldgW && y >= bldgY && y <= bldgY + bldgH) {
+    const frac = 1 - (y - bldgY) / bldgH;
+    const H = buildingHeight();
+    const h = frac * H;
+    const dp = deltaP(h);
+    hoverHeight = h;
+    const hFt = (h * 3.28084).toFixed(0);
+    document.getElementById('hoverInfo').textContent =
+      `Height: ${h.toFixed(1)}m (${hFt} ft) | ΔP: ${dp.toFixed(1)} Pa | Floor ~${Math.floor(h / FLOOR_HEIGHT) + 1}`;
+
+    // Redraw with hover line
+    drawBuilding();
+    bCtx.strokeStyle = '#ffffff88';
+    bCtx.lineWidth = 1;
+    bCtx.setLineDash([3, 3]);
+    bCtx.beginPath();
+    bCtx.moveTo(bldgX, y);
+    bCtx.lineTo(bldgX + bldgW, y);
+    bCtx.stroke();
+    bCtx.setLineDash([]);
+
+    // Hover dot on chart
+    drawChart();
+    const chartMargin = { top: 30, bottom: 50, left: 50, right: 20 };
+    const plotW = chartCanvas.width - chartMargin.left - chartMargin.right;
+    const plotH = chartCanvas.height - chartMargin.top - chartMargin.bottom;
+    const plotX = chartMargin.left;
+    const plotY = chartMargin.top;
+    const dpRange = Math.max(Math.abs(deltaP(0)), Math.abs(deltaP(H)), 1) * 1.2;
+    const zeroX = plotX + plotW / 2;
+    const dotX = zeroX + (dp / dpRange) * (plotW / 2);
+    const dotY = plotY + plotH - frac * plotH;
+    cCtx.fillStyle = '#fff';
+    cCtx.beginPath();
+    cCtx.arc(dotX, dotY, 4, 0, Math.PI * 2);
+    cCtx.fill();
+  } else {
+    hoverHeight = null;
+    document.getElementById('hoverInfo').textContent = 'Hover over the building to see pressure at that height';
+  }
+});
+
+buildingCanvas.addEventListener('mouseleave', () => {
+  hoverHeight = null;
+  document.getElementById('hoverInfo').textContent = 'Hover over the building to see pressure at that height';
+  drawBuilding();
+  drawChart();
+});
+
+// ---- Controls ----
+document.getElementById('floorMinus').addEventListener('click', () => {
+  if (state.floors > 2) {
+    state.floors--;
+    document.getElementById('floorNum').textContent = state.floors;
+    update();
+  }
+});
+
+document.getElementById('floorPlus').addEventListener('click', () => {
+  if (state.floors < 100) {
+    state.floors++;
+    document.getElementById('floorNum').textContent = state.floors;
+    update();
+  }
+});
+
+document.getElementById('tempOut').addEventListener('input', (e) => {
+  const f = parseInt(e.target.value);
+  state.tempOut = fToC(f);
+  document.getElementById('tempOutVal').textContent = `${f}°F`;
+  clearActivePreset();
+  update();
+});
+
+document.getElementById('tempIn').addEventListener('input', (e) => {
+  const f = parseInt(e.target.value);
+  state.tempIn = fToC(f);
+  document.getElementById('tempInVal').textContent = `${f}°F`;
+  clearActivePreset();
+  update();
+});
+
+function clearActivePreset() {
+  document.querySelectorAll('.presets button').forEach(b => b.classList.remove('active'));
+}
+
+document.querySelectorAll('.presets button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const preset = presets[btn.dataset.preset];
+    if (!preset) return;
+    state.tempOut = preset.tempOut;
+    state.tempIn = preset.tempIn;
+    const outF = Math.round(cToF(state.tempOut));
+    const inF = Math.round(cToF(state.tempIn));
+    document.getElementById('tempOut').value = outF;
+    document.getElementById('tempIn').value = inF;
+    document.getElementById('tempOutVal').textContent = `${outF}°F`;
+    document.getElementById('tempInVal').textContent = `${inF}°F`;
+    document.querySelectorAll('.presets button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    update();
+  });
+});
+
+document.getElementById('hvacSlider').addEventListener('input', (e) => {
+  const val = parseInt(e.target.value);
+  state.hvacOffset = val;
+  document.getElementById('hvacVal').textContent = `${val} Pa`;
+  update();
+});
+
+document.getElementById('nppSlider').addEventListener('input', (e) => {
+  const val = parseInt(e.target.value);
+  state.nppFraction = val / 100;
+  document.getElementById('nppVal').textContent = `${val}%`;
+  update();
+});
+
+document.getElementById('shaftSlider').addEventListener('input', (e) => {
+  const val = parseInt(e.target.value);
+  state.shaftFactor = val / 10;
+  document.getElementById('shaftVal').textContent = `${(val / 10).toFixed(1)}×`;
+  update();
+});
+
+document.getElementById('closerSlider').addEventListener('input', (e) => {
+  const val = parseInt(e.target.value);
+  state.closerForce = val / N_TO_LBF;
+  document.getElementById('closerVal').textContent = `${val} lbf`;
+  update();
+});
+
+// ---- Main update ----
+function update() {
+  drawBuilding();
+  drawChart();
+  drawVestibule();
+  updateReadouts();
+}
+
+// Initial render
+update();
+</script>
+</body>
+</html>

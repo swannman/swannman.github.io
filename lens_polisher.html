@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LensPolisher</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #e0e0e0;
+    overflow: hidden;
+    user-select: none;
+  }
+  #ui {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 8px 18px;
+    background: rgba(0,0,0,0.45);
+    border-radius: 0 0 12px 12px;
+    backdrop-filter: blur(6px);
+    z-index: 10;
+  }
+  #ui label {
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #timeSlider {
+    width: 180px;
+    accent-color: #f0a030;
+    cursor: pointer;
+  }
+  #ui button {
+    padding: 5px 14px;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 6px;
+    background: rgba(255,255,255,0.08);
+    color: #e0e0e0;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  #ui button:hover { background: rgba(255,255,255,0.18); }
+  #info {
+    font-size: 12px;
+    color: #aaa;
+    display: flex;
+    gap: 14px;
+  }
+  #info span { white-space: nowrap; }
+  canvas {
+    border-radius: 6px;
+    box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+    cursor: crosshair;
+  }
+  #winOverlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+  }
+  .overlay { display: none; }
+  .overlay.show { display: flex; }
+  #winOverlay h1 {
+    font-size: 48px;
+    color: #ff6600;
+    text-shadow: 0 0 40px #ff4400, 0 0 80px #ff2200;
+    margin-bottom: 12px;
+  }
+  #loseOverlay h1 {
+    font-size: 48px;
+    color: #88ccff;
+    text-shadow: 0 0 40px #4488cc, 0 0 80px #2266aa;
+    margin-bottom: 12px;
+  }
+  .overlay p { color: #ccc; margin-bottom: 20px; }
+  .overlay button {
+    padding: 10px 28px;
+    font-size: 16px;
+    border: none;
+    border-radius: 8px;
+    background: #f0a030;
+    color: #1a1a2e;
+    font-weight: 600;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="ui">
+  <label>Time of Day <input type="range" id="timeSlider" min="15" max="165" value="60"></label>
+  <button id="resetBtn">Reset Glass</button>
+  <div id="info">
+    <span id="focalInfo">Focal: --</span>
+    <span id="heatInfo">Heat: 0%</span>
+  </div>
+</div>
+<canvas id="c"></canvas>
+<div id="winOverlay" class="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center;flex-direction:column;">
+  <h1>FIRE!</h1>
+  <p>You focused the sunlight and overcame the sprinklers!</p>
+  <button id="playAgainBtn">Play Again</button>
+</div>
+<div id="loseOverlay" class="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center;flex-direction:column;">
+  <h1>SHATTERED!</h1>
+  <p>You polished the glass too thin and it broke.</p>
+  <button id="retryBtn">Try Again</button>
+</div>
+<script>
+// ── CANVAS SETUP ──
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 1000, H = 620;
+canvas.width = W; canvas.height = H;
+
+// ── CONSTANTS ──
+const N_GLASS = 1.52;
+const N_AIR = 1.0;
+const GLASS_SAMPLES = 200;
+const GLASS_BASE_THICKNESS = 28;
+const CURVATURE_AMPLIFY = 3; // exaggerate refraction for playability
+const RAY_COUNT = 80;
+
+// Scene geometry
+const SCENE = {
+  wallX: 420,           // x of outer wall face
+  wallThickness: 30,
+  floorY: 540,
+  ceilingY: 80,
+  glassTop: 130,
+  glassBottom: 490,
+  interiorRight: 920,
+  logsX: 590,
+  logsW: 180,
+  logsY: 535,           // base of fire pit on floor
+  logsH: 105,
+  shatterThreshold: 3,  // min glass thickness before shatter
+};
+
+// ── GAME STATE ──
+let glassProfile = new Float32Array(GLASS_SAMPLES); // outer surface offset (material removed)
+let polisher = {
+  pos: 0.5,       // 0..1 along glass height
+  padRadius: 0.06,
+  orbitAngle: 0,
+  orbitRadius: 3,
+  spinAngle: 0,
+  polishing: false, // true when mouse is held down on glass
+};
+let heat = 0;
+let fireStage = 0;  // 0=none, 1=glow, 2=smoke, 3=flame, 4=full fire (win)
+let won = false;
+let shattered = false;
+let shatterParticles = [];
+let sprinklerActive = false;
+let sprinklerParticles = [];
+let sunAngle = 60;   // degrees, from horizon
+let prevSunAngle = 60;
+let particles = [];
+let time = 0;
+
+// ── HELPERS ──
+function lerp(a, b, t) { return a + (b - a) * t; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function degToRad(d) { return d * Math.PI / 180; }
+
+function glassYFromIndex(i) {
+  return lerp(SCENE.glassTop, SCENE.glassBottom, i / (GLASS_SAMPLES - 1));
+}
+function indexFromGlassY(y) {
+  return (y - SCENE.glassTop) / (SCENE.glassBottom - SCENE.glassTop) * (GLASS_SAMPLES - 1);
+}
+
+// Get outer surface X at a given sample index (how far left of the wall the surface is)
+function outerSurfaceX(i) {
+  const removed = glassProfile[clamp(Math.round(i), 0, GLASS_SAMPLES - 1)];
+  return SCENE.wallX - GLASS_BASE_THICKNESS + removed;
+}
+
+// Surface normal at sample index (pointing outward, roughly left)
+function surfaceNormal(i) {
+  const eps = 2;
+  const iLo = clamp(i - eps, 0, GLASS_SAMPLES - 1);
+  const iHi = clamp(i + eps, 0, GLASS_SAMPLES - 1);
+  const xLo = outerSurfaceX(iLo);
+  const xHi = outerSurfaceX(iHi);
+  const yLo = glassYFromIndex(iLo);
+  const yHi = glassYFromIndex(iHi);
+  // tangent along surface — amplify the x-deviation for playable refraction
+  const tx = (xHi - xLo) * CURVATURE_AMPLIFY;
+  const ty = yHi - yLo;
+  // normal is perpendicular to tangent, pointing outward (left-ish)
+  let nx = -ty;
+  let ny = tx;
+  const len = Math.sqrt(nx * nx + ny * ny) || 1;
+  nx /= len; ny /= len;
+  // ensure pointing outward (negative x direction)
+  if (nx > 0) { nx = -nx; ny = -ny; }
+  return { x: nx, y: ny };
+}
+
+// Snell's law refraction. Returns null if total internal reflection.
+function refract(dirX, dirY, nx, ny, n1, n2) {
+  // Ensure normal faces against incoming ray
+  let dot = dirX * nx + dirY * ny;
+  let faceNx = nx, faceNy = ny;
+  if (dot > 0) {
+    faceNx = -nx; faceNy = -ny;
+    dot = -dot;
+  }
+  const ratio = n1 / n2;
+  const cosI = -dot;
+  const sinSqT = ratio * ratio * (1 - cosI * cosI);
+  if (sinSqT > 1) return null; // total internal reflection
+  const cosT = Math.sqrt(1 - sinSqT);
+  const tX = ratio * dirX + (ratio * cosI - cosT) * faceNx;
+  const tY = ratio * dirY + (ratio * cosI - cosT) * faceNy;
+  const tLen = Math.sqrt(tX * tX + tY * tY) || 1;
+  return { x: tX / tLen, y: tY / tLen };
+}
+
+function reflect(dirX, dirY, nx, ny) {
+  const dot = dirX * nx + dirY * ny;
+  return {
+    x: dirX - 2 * dot * nx,
+    y: dirY - 2 * dot * ny,
+  };
+}
+
+// ── POLISHER ──
+function updatePolisher(dt) {
+  polisher.orbitAngle += 0.15;
+  polisher.spinAngle += 0.3;
+
+  if (!polisher.polishing || shattered) return;
+
+  // Material removal: Gaussian centered on polisher position
+  const centerIdx = polisher.pos * (GLASS_SAMPLES - 1);
+  const sigma = polisher.padRadius * GLASS_SAMPLES;
+  const removalRate = 0.05;
+  for (let i = 0; i < GLASS_SAMPLES; i++) {
+    const dist = (i - centerIdx) / sigma;
+    const removal = removalRate * Math.exp(-0.5 * dist * dist);
+    glassProfile[i] = Math.min(glassProfile[i] + removal, GLASS_BASE_THICKNESS - 1);
+  }
+
+  // Check for shatter — if any point is too thin
+  for (let i = 0; i < GLASS_SAMPLES; i++) {
+    const thickness = GLASS_BASE_THICKNESS - glassProfile[i];
+    if (thickness < SCENE.shatterThreshold) {
+      triggerShatter(i);
+      return;
+    }
+  }
+}
+
+function triggerShatter(breakIdx) {
+  shattered = true;
+  polisher.polishing = false;
+  // Spawn glass shard particles from the break point
+  const breakY = glassYFromIndex(breakIdx);
+  const breakX = outerSurfaceX(breakIdx);
+  for (let i = 0; i < 60; i++) {
+    shatterParticles.push({
+      x: breakX + (Math.random() - 0.3) * GLASS_BASE_THICKNESS,
+      y: breakY + (Math.random() - 0.5) * 80,
+      vx: (Math.random() - 0.5) * 6,
+      vy: (Math.random() - 0.3) * 4,
+      rot: Math.random() * Math.PI * 2,
+      vr: (Math.random() - 0.5) * 0.3,
+      w: 3 + Math.random() * 8,
+      h: 2 + Math.random() * 5,
+      life: 1,
+      decay: 0.005 + Math.random() * 0.005,
+      gravity: 0.08 + Math.random() * 0.04,
+    });
+  }
+  setTimeout(() => {
+    document.getElementById('loseOverlay').classList.add('show');
+  }, 800);
+}
+
+// ── RAY TRACING ──
+let rayPaths = [];
+let rayHits = []; // {x, y, intensity} of rays hitting interior
+
+function traceRays() {
+  const angleDeg = sunAngle;
+  const angleRad = degToRad(angleDeg);
+  // Sun direction: coming from upper-left
+  const dirX = Math.cos(Math.PI - angleRad);  // generally rightward
+  const dirY = Math.sin(Math.PI - angleRad);   // generally downward (positive)
+  // Actually let's define: sun at angle from horizon, shining rightward and downward
+  const sdx = Math.cos(angleRad);  // positive = rightward
+  const sdy = -Math.sin(angleRad); // negative = downward (but we want it going down)
+  // Rays travel in the direction toward the building from the left
+  // angle 90 = straight from above, angle 15 = low from left
+  const rayDirX = Math.sin(degToRad(angleDeg));  // rightward component
+  const rayDirY = Math.cos(degToRad(angleDeg));   // downward component
+
+  rayPaths = [];
+  rayHits = [];
+
+  // Generate parallel rays spread across the glass area
+  for (let r = 0; r < RAY_COUNT; r++) {
+    const t = r / (RAY_COUNT - 1);
+    // Target Y on the glass
+    const targetY = lerp(SCENE.glassTop + 10, SCENE.glassBottom - 10, t);
+    // Starting point far left
+    const startX = -50;
+    // Calculate startY so the ray, traveling in (rayDirX, rayDirY), passes through the glass at targetY
+    const travelX = SCENE.wallX - GLASS_BASE_THICKNESS - startX;
+    const travelT = travelX / rayDirX;
+    const startY = targetY - rayDirY * travelT;
+
+    const path = [{ x: startX, y: startY }];
+
+    // March the ray to find intersection with outer glass surface
+    let hitOuter = null;
+    let hitIdx = -1;
+    const step = 0.8;
+    let rx = startX, ry = startY;
+    let passedGlass = false;
+    for (let s = 0; s < 1500; s++) {
+      rx += rayDirX * step;
+      ry += rayDirY * step;
+      const idx = indexFromGlassY(ry);
+      if (idx >= 0 && idx < GLASS_SAMPLES) {
+        passedGlass = true;
+        const surfX = outerSurfaceX(idx);
+        if (rx >= surfX) {
+          hitOuter = { x: surfX, y: ry };
+          hitIdx = idx;
+          break;
+        }
+      } else if (passedGlass) {
+        // Ray has left the glass region without hitting — stop
+        break;
+      }
+      // If rx is past the wall and we haven't hit glass, stop
+      if (rx > SCENE.wallX + 10) break;
+    }
+
+    if (!hitOuter) continue;
+    path.push({ x: hitOuter.x, y: hitOuter.y });
+
+    // Surface normal at hit point
+    const n = surfaceNormal(hitIdx);
+
+    // Refract at air → glass
+    const refracted1 = refract(rayDirX, rayDirY, n.x, n.y, N_AIR, N_GLASS);
+    if (!refracted1) {
+      // Total reflection (unlikely at this interface)
+      const refl = reflect(rayDirX, rayDirY, n.x, n.y);
+      path.push({ x: hitOuter.x + refl.x * 200, y: hitOuter.y + refl.y * 200 });
+      rayPaths.push(path);
+      continue;
+    }
+
+    // Trace through glass to inner surface (flat, at wallX)
+    const innerX = SCENE.wallX;
+    if (refracted1.x === 0) continue;
+    const tInner = (innerX - hitOuter.x) / refracted1.x;
+    if (tInner < 0) continue;
+    const innerY = hitOuter.y + refracted1.y * tInner;
+    const innerHit = { x: innerX, y: innerY };
+    path.push(innerHit);
+
+    // Inner surface normal (pointing left, into glass)
+    const innerNormal = { x: -1, y: 0 };
+
+    // Refract at glass → air
+    const refracted2 = refract(refracted1.x, refracted1.y, innerNormal.x, innerNormal.y, N_GLASS, N_AIR);
+    if (!refracted2) {
+      // Total internal reflection
+      const refl = reflect(refracted1.x, refracted1.y, innerNormal.x, innerNormal.y);
+      path.push({ x: innerX + refl.x * 50, y: innerY + refl.y * 50 });
+      rayPaths.push(path);
+      continue;
+    }
+
+    // Continue ray into interior — always trace to floor/ceiling/wall for visuals
+    if (refracted2.x === 0) continue;
+    let finalX, finalY;
+
+    // Find where ray hits floor, ceiling, or far wall
+    if (refracted2.y > 0) {
+      const tFloor = (SCENE.floorY - innerY) / refracted2.y;
+      const xAtFloor = innerX + refracted2.x * tFloor;
+      if (xAtFloor <= SCENE.interiorRight && xAtFloor >= innerX) {
+        finalX = xAtFloor;
+        finalY = SCENE.floorY;
+      }
+    }
+    if (!finalX && refracted2.y < 0) {
+      const tCeil = (SCENE.ceilingY - innerY) / refracted2.y;
+      const xAtCeil = innerX + refracted2.x * tCeil;
+      if (xAtCeil <= SCENE.interiorRight && xAtCeil >= innerX) {
+        finalX = xAtCeil;
+        finalY = SCENE.ceilingY;
+      }
+    }
+    if (!finalX) {
+      const tWall = (SCENE.interiorRight - innerX) / refracted2.x;
+      finalX = SCENE.interiorRight;
+      finalY = clamp(innerY + refracted2.y * tWall, SCENE.ceilingY, SCENE.floorY);
+    }
+
+    // Hit detection: tight AABB matching the actual drawn logs
+    const logCX = SCENE.logsX + SCENE.logsW / 2;
+    const logLeft = logCX - 42;
+    const logRight = logCX + 44;
+    const logTop = SCENE.logsY - 45;
+    const logBottom = SCENE.logsY + 3;
+    let hitLogs = false;
+
+    // Check if ray passes through the log pile volume
+    if (refracted2.x > 0) {
+      let tMinX = (logLeft - innerX) / refracted2.x;
+      let tMaxX = (logRight - innerX) / refracted2.x;
+      if (tMinX > tMaxX) { const tmp = tMinX; tMinX = tMaxX; tMaxX = tmp; }
+
+      let tMinY, tMaxY;
+      if (Math.abs(refracted2.y) > 0.0001) {
+        tMinY = (logTop - innerY) / refracted2.y;
+        tMaxY = (logBottom - innerY) / refracted2.y;
+        if (tMinY > tMaxY) { const tmp = tMinY; tMinY = tMaxY; tMaxY = tmp; }
+      } else {
+        tMinY = (innerY >= logTop && innerY <= logBottom) ? -Infinity : Infinity;
+        tMaxY = (innerY >= logTop && innerY <= logBottom) ? Infinity : -Infinity;
+      }
+
+      const tEnter = Math.max(tMinX, tMinY, 0);
+      const tExit = Math.min(tMaxX, tMaxY);
+
+      if (tEnter < tExit && tExit > 0) {
+        const hx = innerX + refracted2.x * tEnter;
+        const hy = innerY + refracted2.y * tEnter;
+        rayHits.push({ x: hx, y: hy, intensity: 1 });
+        hitLogs = true;
+      }
+    }
+    // Floor hits on the logs (only if not already counted via volume)
+    if (!hitLogs && finalY >= SCENE.floorY - 2 && finalX >= logLeft && finalX <= logRight) {
+      rayHits.push({ x: finalX, y: finalY, intensity: 1 });
+    }
+
+    path.push({ x: finalX, y: finalY });
+    rayPaths.push(path);
+  }
+}
+
+// ── HEAT & FIRE ──
+function updateHeat(dt) {
+  if (won || shattered) return;
+
+  // Calculate concentration: how tightly focused are the rays on the logs?
+  if (rayHits.length > 3) {
+    // Use 10th-90th percentile X spread to measure focus quality
+    const xs = rayHits.map(h => h.x).sort((a, b) => a - b);
+    const lo = Math.floor(rayHits.length * 0.1);
+    const hi = Math.floor(rayHits.length * 0.9);
+    const spreadX = xs[hi] - xs[lo];
+    // Normalize: 0 = fills entire log width (~86px), 1 = pinpoint focus
+    const normSpread = spreadX / 86;
+    const concentration = clamp(1 - normSpread, 0, 1);
+    const hitRatio = rayHits.length / RAY_COUNT;
+    // Need real focus (concentration > 0.3) before any heat — flat glass doesn't count
+    const focusLevel = clamp((concentration - 0.3) / 0.7, 0, 1);
+    const intensity = hitRatio * Math.pow(focusLevel, 1.5);
+    heat += intensity * 4.0 * dt;
+  }
+
+  // Dissipation — base rate when no light is hitting
+  const noHitsDecay = (rayHits.length <= 3) ? 0.15 : 0.06;
+  heat -= noHitsDecay * dt;
+
+  // Sun angle change disrupts focus — extra dissipation proportional to movement
+  const angleDelta = Math.abs(sunAngle - prevSunAngle);
+  if (angleDelta > 0.01) {
+    heat -= angleDelta * 0.8 * dt;
+  }
+
+  // Sprinkler fights the fire!
+  if (sprinklerActive) {
+    heat -= 0.25 * dt;
+  }
+
+  heat = clamp(heat, 0, 100);
+
+  // Fire stages
+  if (heat < 15) { fireStage = 0; sprinklerActive = false; }
+  else if (heat < 35) { fireStage = 1; sprinklerActive = false; }
+  else if (heat < 60) fireStage = 2;
+  else if (heat < 90) {
+    fireStage = 3;
+    sprinklerActive = true; // sprinkler kicks in at flame stage
+  } else {
+    fireStage = 4;
+    if (!won) {
+      won = true;
+      setTimeout(() => {
+        document.getElementById('winOverlay').classList.add('show');
+      }, 500);
+    }
+  }
+}
+
+// ── PARTICLES ──
+function spawnParticles() {
+  const cx = SCENE.logsX + SCENE.logsW / 2;
+  const cy = SCENE.logsY - SCENE.logsH / 2;
+
+  if (fireStage >= 2) {
+    // Smoke
+    if (Math.random() < 0.3 + fireStage * 0.15) {
+      particles.push({
+        x: cx + (Math.random() - 0.5) * 30,
+        y: cy - 5,
+        vx: (Math.random() - 0.5) * 0.5,
+        vy: -0.5 - Math.random() * 1.5,
+        life: 1,
+        decay: 0.008 + Math.random() * 0.008,
+        size: 3 + Math.random() * 6,
+        type: 'smoke',
+      });
+    }
+  }
+  if (fireStage >= 3) {
+    // Fire particles
+    if (Math.random() < 0.4 + (fireStage - 3) * 0.3) {
+      particles.push({
+        x: cx + (Math.random() - 0.5) * 25,
+        y: cy,
+        vx: (Math.random() - 0.5) * 1,
+        vy: -1 - Math.random() * 3,
+        life: 1,
+        decay: 0.02 + Math.random() * 0.02,
+        size: 2 + Math.random() * 5,
+        type: 'fire',
+      });
+    }
+  }
+
+  // Update
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= p.decay;
+    if (p.type === 'smoke') {
+      p.vx += (Math.random() - 0.5) * 0.1;
+      p.size += 0.1;
+    }
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// ── RENDERING ──
+function getSkyColor(angleDeg) {
+  // Sunrise/sunset → warm, midday → bright blue
+  const t = (angleDeg - 15) / 150; // 0 at sunrise, 1 at sunset
+  const midT = 1 - Math.abs(t - 0.5) * 2; // 1 at noon, 0 at edges
+  const r = Math.round(lerp(255, 100, midT));
+  const g = Math.round(lerp(140, 160, midT));
+  const b = Math.round(lerp(50, 240, midT));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawSky() {
+  const skyColor = getSkyColor(sunAngle);
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  const t = (sunAngle - 15) / 150;
+  const midT = 1 - Math.abs(t - 0.5) * 2;
+  grad.addColorStop(0, skyColor);
+  grad.addColorStop(0.6, `rgb(${Math.round(lerp(200, 60, midT))},${Math.round(lerp(100, 100, midT))},${Math.round(lerp(40, 180, midT))})`);
+  grad.addColorStop(1, '#2a1a0a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, SCENE.wallX - GLASS_BASE_THICKNESS, H);
+}
+
+function drawSun() {
+  const angleRad = degToRad(sunAngle);
+  const sunDist = 350;
+  const cx = SCENE.wallX - GLASS_BASE_THICKNESS - sunDist * Math.cos(angleRad);
+  const cy = SCENE.floorY - sunDist * Math.sin(angleRad);
+
+  // Glow
+  const glow = ctx.createRadialGradient(cx, cy, 5, cx, cy, 60);
+  glow.addColorStop(0, 'rgba(255,240,180,0.9)');
+  glow.addColorStop(0.3, 'rgba(255,200,80,0.3)');
+  glow.addColorStop(1, 'rgba(255,150,30,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(cx - 60, cy - 60, 120, 120);
+
+  // Disk
+  ctx.beginPath();
+  ctx.arc(cx, cy, 18, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff8d0';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(cx, cy, 15, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffe070';
+  ctx.fill();
+}
+
+function drawBuilding() {
+  // Wall exterior face
+  ctx.fillStyle = '#6b5b4f';
+  ctx.fillRect(SCENE.wallX - SCENE.wallThickness, SCENE.ceilingY, SCENE.wallThickness, SCENE.floorY - SCENE.ceilingY);
+
+  // Wall texture lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 1;
+  for (let y = SCENE.ceilingY; y < SCENE.floorY; y += 20) {
+    ctx.beginPath();
+    ctx.moveTo(SCENE.wallX - SCENE.wallThickness, y);
+    ctx.lineTo(SCENE.wallX, y);
+    ctx.stroke();
+  }
+
+  // Interior
+  const intGrad = ctx.createLinearGradient(SCENE.wallX, 0, SCENE.interiorRight, 0);
+  intGrad.addColorStop(0, '#3a3530');
+  intGrad.addColorStop(1, '#2a2520');
+  ctx.fillStyle = intGrad;
+  ctx.fillRect(SCENE.wallX, SCENE.ceilingY, SCENE.interiorRight - SCENE.wallX, SCENE.floorY - SCENE.ceilingY);
+
+  // Floor
+  ctx.fillStyle = '#4a3f35';
+  ctx.fillRect(SCENE.wallX, SCENE.floorY - 10, SCENE.interiorRight - SCENE.wallX, 10);
+  ctx.fillStyle = '#3a302a';
+  ctx.fillRect(SCENE.wallX, SCENE.floorY, SCENE.interiorRight - SCENE.wallX, H - SCENE.floorY);
+
+  // Ceiling
+  ctx.fillStyle = '#4a4540';
+  ctx.fillRect(SCENE.wallX, SCENE.ceilingY, SCENE.interiorRight - SCENE.wallX, 8);
+  ctx.fillStyle = '#5a5550';
+  ctx.fillRect(0, SCENE.ceilingY - 15, SCENE.interiorRight + 40, 15);
+
+  // Floor continuation outside
+  ctx.fillStyle = '#5a4a3a';
+  ctx.fillRect(0, SCENE.floorY, SCENE.wallX, H - SCENE.floorY);
+
+  // Right wall
+  ctx.fillStyle = '#5a5040';
+  ctx.fillRect(SCENE.interiorRight, SCENE.ceilingY - 15, W - SCENE.interiorRight, H - SCENE.ceilingY + 15);
+
+  // Window frame
+  ctx.strokeStyle = '#8a7a6a';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(SCENE.wallX - GLASS_BASE_THICKNESS - 4, SCENE.glassTop - 4,
+    GLASS_BASE_THICKNESS + 8, SCENE.glassBottom - SCENE.glassTop + 8);
+  ctx.strokeStyle = '#5a4a3a';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(SCENE.wallX - GLASS_BASE_THICKNESS - 6, SCENE.glassTop - 6,
+    GLASS_BASE_THICKNESS + 12, SCENE.glassBottom - SCENE.glassTop + 12);
+}
+
+function drawSprinklers() {
+  // Sprinkler heads on ceiling
+  const sprinklerPositions = [540, 660, 780];
+  const headY = SCENE.ceilingY + 8;
+
+  for (const sx of sprinklerPositions) {
+    // Pipe
+    ctx.fillStyle = '#888';
+    ctx.fillRect(sx - 1, SCENE.ceilingY, 3, 10);
+    // Head
+    ctx.fillStyle = sprinklerActive ? '#cc4444' : '#999';
+    ctx.beginPath();
+    ctx.moveTo(sx - 6, headY);
+    ctx.lineTo(sx + 6, headY);
+    ctx.lineTo(sx + 4, headY + 4);
+    ctx.lineTo(sx - 4, headY + 4);
+    ctx.closePath();
+    ctx.fill();
+    // Indicator light
+    ctx.beginPath();
+    ctx.arc(sx, headY - 1, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = sprinklerActive ? '#ff2222' : '#44aa44';
+    ctx.fill();
+  }
+
+  if (!sprinklerActive) return;
+
+  // Spawn water drops
+  for (const sx of sprinklerPositions) {
+    if (Math.random() < 0.7) {
+      sprinklerParticles.push({
+        x: sx + (Math.random() - 0.5) * 40,
+        y: headY + 5,
+        vx: (Math.random() - 0.5) * 2,
+        vy: 2 + Math.random() * 3,
+        life: 1,
+        size: 1 + Math.random() * 2,
+      });
+    }
+  }
+
+  // Update & draw water
+  for (let i = sprinklerParticles.length - 1; i >= 0; i--) {
+    const p = sprinklerParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.1;
+    p.life -= 0.01;
+    if (p.life <= 0 || p.y > SCENE.floorY) {
+      sprinklerParticles.splice(i, 1);
+      continue;
+    }
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(100, 160, 255, ${p.life * 0.5})`;
+    ctx.fill();
+  }
+
+  // Splash on floor
+  if (Math.random() < 0.3) {
+    const sx = sprinklerPositions[Math.floor(Math.random() * 3)];
+    ctx.beginPath();
+    ctx.arc(sx + (Math.random() - 0.5) * 50, SCENE.floorY - 1, 2 + Math.random() * 3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(100, 160, 255, 0.15)';
+    ctx.fill();
+  }
+}
+
+function drawGlass() {
+  // Draw the glass panel with its curved outer surface
+  ctx.beginPath();
+  // Start at top inner surface
+  ctx.moveTo(SCENE.wallX, SCENE.glassTop);
+
+  // Inner surface (flat) — top to bottom
+  ctx.lineTo(SCENE.wallX, SCENE.glassBottom);
+
+  // Outer surface — bottom to top (curved)
+  for (let i = GLASS_SAMPLES - 1; i >= 0; i--) {
+    const y = glassYFromIndex(i);
+    const x = outerSurfaceX(i);
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+
+  // Glass fill with slight transparency
+  const glassGrad = ctx.createLinearGradient(
+    SCENE.wallX - GLASS_BASE_THICKNESS, 0, SCENE.wallX, 0);
+  glassGrad.addColorStop(0, 'rgba(180, 220, 240, 0.35)');
+  glassGrad.addColorStop(0.5, 'rgba(200, 235, 255, 0.25)');
+  glassGrad.addColorStop(1, 'rgba(180, 220, 240, 0.3)');
+  ctx.fillStyle = glassGrad;
+  ctx.fill();
+
+  // Glass edges
+  ctx.strokeStyle = 'rgba(150, 200, 230, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Surface detail — show curvature with subtle lines
+  ctx.strokeStyle = 'rgba(200, 230, 255, 0.2)';
+  ctx.lineWidth = 0.5;
+  for (let i = 0; i < GLASS_SAMPLES; i += 4) {
+    const y = glassYFromIndex(i);
+    const xOuter = outerSurfaceX(i);
+    ctx.beginPath();
+    ctx.moveTo(xOuter, y);
+    ctx.lineTo(SCENE.wallX, y);
+    ctx.stroke();
+  }
+
+  // Highlight polished regions more strongly
+  for (let i = 1; i < GLASS_SAMPLES - 1; i++) {
+    const removal = glassProfile[i];
+    if (removal > 0.5) {
+      const y = glassYFromIndex(i);
+      const x = outerSurfaceX(i);
+      const alpha = Math.min(removal / 8, 0.3);
+      ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+      ctx.fillRect(x, y - 1, SCENE.wallX - x, 2);
+    }
+  }
+}
+
+function drawPolisher() {
+  if (!polisher.polishing) return;
+  const py = lerp(SCENE.glassTop, SCENE.glassBottom, polisher.pos);
+  const idx = polisher.pos * (GLASS_SAMPLES - 1);
+  const px = outerSurfaceX(idx) - 12;
+  const padR = polisher.padRadius * (SCENE.glassBottom - SCENE.glassTop);
+
+  // Orbit offset
+  const ox = Math.cos(polisher.orbitAngle) * polisher.orbitRadius;
+  const oy = Math.sin(polisher.orbitAngle) * polisher.orbitRadius;
+
+  const cx = px + ox;
+  const cy = py + oy;
+
+  // Pad body
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(polisher.spinAngle);
+
+  // Backing plate
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 14, padR * 0.7, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(60, 60, 70, 0.8)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(100, 100, 110, 0.6)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Foam pad
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 11, padR * 0.55, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255, 140, 40, 0.7)';
+  ctx.fill();
+
+  // Spin marks
+  for (let a = 0; a < 6; a++) {
+    const angle = (a / 6) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(angle) * 3, Math.sin(angle) * 3);
+    ctx.lineTo(Math.cos(angle) * 10, Math.sin(angle) * padR * 0.5);
+    ctx.strokeStyle = 'rgba(255, 180, 80, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // Handle / arm going off screen left
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx - 40, cy - 20);
+  ctx.lineTo(-10, cy - 60);
+  ctx.strokeStyle = 'rgba(80, 80, 90, 0.6)';
+  ctx.lineWidth = 5;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(100, 100, 110, 0.4)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+function drawRays() {
+  for (const path of rayPaths) {
+    if (path.length < 2) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(path[0].x, path[0].y);
+    for (let i = 1; i < path.length; i++) {
+      ctx.lineTo(path[i].x, path[i].y);
+    }
+    ctx.strokeStyle = 'rgba(255, 220, 80, 0.25)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Brighter core
+    ctx.beginPath();
+    ctx.moveTo(path[0].x, path[0].y);
+    for (let i = 1; i < path.length; i++) {
+      ctx.lineTo(path[i].x, path[i].y);
+    }
+    ctx.strokeStyle = 'rgba(255, 240, 150, 0.12)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+
+  // Ray convergence glow — show where light concentrates
+  if (rayHits.length > 2) {
+    const avgX = rayHits.reduce((s, h) => s + h.x, 0) / rayHits.length;
+    const avgY = rayHits.reduce((s, h) => s + h.y, 0) / rayHits.length;
+    const xs = rayHits.map(h => h.x);
+    const spread = Math.max(...xs) - Math.min(...xs);
+    const focusIntensity = clamp(1 - spread / 100, 0, 1);
+
+    if (focusIntensity > 0.05) {
+      const r = 20 + spread * 0.5;
+      const glow = ctx.createRadialGradient(avgX, avgY, 0, avgX, avgY, r);
+      glow.addColorStop(0, `rgba(255, 220, 60, ${focusIntensity * 0.6})`);
+      glow.addColorStop(0.4, `rgba(255, 150, 30, ${focusIntensity * 0.25})`);
+      glow.addColorStop(1, 'rgba(255, 100, 0, 0)');
+      ctx.fillStyle = glow;
+      ctx.fillRect(avgX - r, avgY - r, r * 2, r * 2);
+    }
+  }
+}
+
+function drawFirePit() {
+  const lx = SCENE.logsX;
+  const ly = SCENE.logsY - SCENE.logsH;
+  const lw = SCENE.logsW;
+  const lh = SCENE.logsH;
+  const cx = lx + lw / 2;
+  const cy = SCENE.logsY - lh / 2;
+
+  // Stone ring / pit base
+  ctx.fillStyle = '#4a4040';
+  ctx.beginPath();
+  ctx.ellipse(cx, SCENE.logsY + 2, lw * 0.6, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#5a5050';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Stones around the pit
+  const stoneColors = ['#6a5a50', '#5a4a40', '#7a6a60', '#6a6058'];
+  for (let a = 0; a < 10; a++) {
+    const angle = (a / 10) * Math.PI * 2;
+    const sx = cx + Math.cos(angle) * lw * 0.55;
+    const sy = SCENE.logsY + Math.sin(angle) * 8;
+    ctx.beginPath();
+    ctx.ellipse(sx, sy, 7, 5, angle * 0.3, 0, Math.PI * 2);
+    ctx.fillStyle = stoneColors[a % stoneColors.length];
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  // Ash bed
+  ctx.fillStyle = '#3a3030';
+  ctx.beginPath();
+  ctx.ellipse(cx, SCENE.logsY, lw * 0.45, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Logs — stacked kindling and split logs
+  const logData = [
+    { x: cx - 38, y: SCENE.logsY - 10, w: 80, h: 11, angle: -0.1, color: '#6b4226' },
+    { x: cx - 30, y: SCENE.logsY - 19, w: 72, h: 10, angle: 0.15, color: '#7a5030' },
+    { x: cx - 22, y: SCENE.logsY - 30, w: 58, h: 10, angle: -0.08, color: '#5a3820' },
+    // Crossed kindling on top
+    { x: cx - 32, y: SCENE.logsY - 38, w: 50, h: 5, angle: 0.4, color: '#8a6040' },
+    { x: cx - 12, y: SCENE.logsY - 42, w: 44, h: 5, angle: -0.35, color: '#7a5535' },
+  ];
+
+  for (const log of logData) {
+    ctx.save();
+    ctx.translate(log.x + log.w / 2, log.y + log.h / 2);
+    ctx.rotate(log.angle);
+    // Log body
+    ctx.fillStyle = log.color;
+    ctx.beginPath();
+    ctx.roundRect(-log.w / 2, -log.h / 2, log.w, log.h, log.h / 2);
+    ctx.fill();
+    // Bark texture
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+    ctx.lineWidth = 0.5;
+    for (let t = -log.w / 2 + 4; t < log.w / 2; t += 6) {
+      ctx.beginPath();
+      ctx.moveTo(t, -log.h / 2 + 1);
+      ctx.lineTo(t + 2, log.h / 2 - 1);
+      ctx.stroke();
+    }
+    // End grain circle
+    ctx.beginPath();
+    ctx.ellipse(log.w / 2 - 1, 0, log.h / 2 - 1, log.h / 2 - 1, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#c4a060';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(log.w / 2 - 1, 0, 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#8a6040';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Heat glow effect
+  if (fireStage >= 1) {
+    const glowIntensity = (heat - 10) / 90;
+    const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 60 + glowIntensity * 40);
+    glow.addColorStop(0, `rgba(255, ${Math.round(160 - glowIntensity * 80)}, 0, ${glowIntensity * 0.6})`);
+    glow.addColorStop(0.4, `rgba(255, 100, 0, ${glowIntensity * 0.25})`);
+    glow.addColorStop(1, 'rgba(255, 50, 0, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(cx - 100, cy - 100, 200, 200);
+  }
+
+  // Embers / charring on logs
+  if (fireStage >= 2) {
+    const charAlpha = clamp((heat - 30) / 60, 0, 0.7);
+    for (const log of logData) {
+      ctx.save();
+      ctx.translate(log.x + log.w / 2, log.y + log.h / 2);
+      ctx.rotate(log.angle);
+      ctx.fillStyle = `rgba(200, 60, 0, ${charAlpha * 0.5})`;
+      ctx.fillRect(-log.w / 3, -log.h / 3, log.w * 0.6, log.h * 0.6);
+      ctx.restore();
+    }
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    if (p.type === 'smoke') {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(120, 110, 100, ${p.life * 0.35})`;
+      ctx.fill();
+    } else if (p.type === 'fire') {
+      const r = 255;
+      const g = Math.round(lerp(200, 50, 1 - p.life));
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r}, ${g}, 0, ${p.life * 0.8})`;
+      ctx.fill();
+    }
+  }
+}
+
+function updateShatterParticles() {
+  for (let i = shatterParticles.length - 1; i >= 0; i--) {
+    const p = shatterParticles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += p.gravity;
+    p.rot += p.vr;
+    p.life -= p.decay;
+    if (p.life <= 0 || p.y > H + 20) shatterParticles.splice(i, 1);
+  }
+}
+
+function drawShatterParticles() {
+  for (const p of shatterParticles) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot);
+    ctx.fillStyle = `rgba(180, 220, 240, ${p.life * 0.7})`;
+    ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+    // Glass glint
+    ctx.fillStyle = `rgba(255, 255, 255, ${p.life * 0.3})`;
+    ctx.fillRect(-p.w / 4, -p.h / 4, p.w / 2, p.h / 2);
+    ctx.restore();
+  }
+}
+
+
+// ── GLASS INTEGRITY UI ──
+function drawGlassIntegrity() {
+  // Find thinnest point
+  let minThickness = GLASS_BASE_THICKNESS;
+  for (let i = 0; i < GLASS_SAMPLES; i++) {
+    const t = GLASS_BASE_THICKNESS - glassProfile[i];
+    if (t < minThickness) minThickness = t;
+  }
+  const pct = ((minThickness - SCENE.shatterThreshold) / (GLASS_BASE_THICKNESS - SCENE.shatterThreshold)) * 100;
+  const display = Math.max(0, Math.round(pct));
+  const el = document.getElementById('focalInfo');
+  el.textContent = `Glass: ${display}%`;
+  el.style.color = display < 25 ? '#ff4444' : display < 50 ? '#ffaa44' : '#aaa';
+}
+
+// ── MAIN LOOP ──
+function draw() {
+  time++;
+  ctx.clearRect(0, 0, W, H);
+
+  prevSunAngle = sunAngle;
+  sunAngle = parseFloat(document.getElementById('timeSlider').value);
+
+  updatePolisher(1);
+  if (!shattered) {
+    traceRays();
+    updateHeat(1);
+  }
+  spawnParticles();
+  updateShatterParticles();
+
+  drawSky();
+  drawSun();
+  drawBuilding();
+  drawSprinklers();
+  drawFirePit();
+  if (!shattered) {
+    drawGlass();
+    drawRays();
+    drawPolisher();
+  }
+  drawParticles();
+  drawShatterParticles();
+  drawGlassIntegrity();
+
+  // Heat display
+  document.getElementById('heatInfo').textContent = `Heat: ${Math.round(heat)}%`;
+  document.getElementById('heatInfo').style.color =
+    heat > 60 ? '#ff4400' : heat > 30 ? '#ffaa00' : '#aaa';
+
+  requestAnimationFrame(draw);
+}
+
+// ── INPUT ──
+function getCanvasPos(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (W / rect.width),
+    y: (e.clientY - rect.top) * (H / rect.height),
+  };
+}
+
+function isOnGlass(mx, my) {
+  return mx > SCENE.wallX - GLASS_BASE_THICKNESS - 60 && mx < SCENE.wallX + 30
+    && my >= SCENE.glassTop && my <= SCENE.glassBottom;
+}
+
+canvas.addEventListener('mousedown', (e) => {
+  const { x, y } = getCanvasPos(e);
+  if (!shattered && isOnGlass(x, y)) {
+    const t = (y - SCENE.glassTop) / (SCENE.glassBottom - SCENE.glassTop);
+    polisher.pos = clamp(t, 0.02, 0.98);
+    polisher.polishing = true;
+  }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+  if (!polisher.polishing) return;
+  const { x, y } = getCanvasPos(e);
+  const t = (y - SCENE.glassTop) / (SCENE.glassBottom - SCENE.glassTop);
+  polisher.pos = clamp(t, 0.02, 0.98);
+});
+
+canvas.addEventListener('mouseup', () => { polisher.polishing = false; });
+canvas.addEventListener('mouseleave', () => { polisher.polishing = false; });
+
+function fullReset() {
+  glassProfile.fill(0);
+  heat = 0;
+  fireStage = 0;
+  won = false;
+  shattered = false;
+  sprinklerActive = false;
+  sprinklerParticles = [];
+  particles = [];
+  shatterParticles = [];
+  document.getElementById('winOverlay').classList.remove('show');
+  document.getElementById('loseOverlay').classList.remove('show');
+}
+
+document.getElementById('resetBtn').addEventListener('click', fullReset);
+document.getElementById('playAgainBtn').addEventListener('click', fullReset);
+document.getElementById('retryBtn').addEventListener('click', fullReset);
+
+// Start
+draw();
+</script>
+</body>
+</html>
