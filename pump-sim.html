@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cycle-Stop Valve Pump System Simulator</title>
+<!--
+  Cycle-Stop Valve Pump System Simulator — single-file, no dependencies.
+  Calibrated to real products. Sources (researched 2026-06-26):
+    PUMP  Flint & Walling 4F35S30 (3HP/35GPM); curve anchored to Goulds 35GS30 class.
+          H(Q)=406-0.1273*Q^2 ft ; rated 35gpm@250ft ; shutoff 406ft/175.9psi.
+          deanbennettsupply.com, aquascience.net (35GS30 176psi shutoff)
+    CSV   Cycle Stop Valves CSV3A + CSV1A pilot. Min continuous flow 5 GPM.
+          Holds constant downstream pressure; pilot 15-150psi. cyclestopvalves.com
+    TANK  Amtrol WellXTrol. Boyle's law drawdown; precharge = cut-in - 2.
+          dP/dt = P^2 * Qnet / (P0_abs * Vtank). amtrol.com / thedriller.com
+    HEADS Q = K*sqrt(P). Rain Bird 1800 sprays / Hunter PGP rotors.
+          irrigationtutorials.com, rainbird.com
+-->
+<style>
+  :root{
+    --bg:#0f1b2d; --panel:#16263c; --panel2:#1d3251; --ink:#eaf2ff;
+    --muted:#9fb3cd; --water:#39b7ff; --water2:#1d7fd6;
+    --green:#3ddc84; --amber:#ffc24b; --red:#ff5d6c; --accent:#7c5cff;
+    --good:#3ddc84;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:"Segoe UI",system-ui,Arial,sans-serif;
+    background:radial-gradient(1200px 600px at 50% -10%, #1b3354 0%, var(--bg) 60%);
+    color:var(--ink); min-height:100vh;
+  }
+  header{padding:18px 24px 6px; text-align:center}
+  header h1{margin:0; font-size:22px; letter-spacing:.3px}
+  header p{margin:4px 0 0; color:var(--muted); font-size:13px}
+  .wrap{max-width:1180px; margin:0 auto; padding:10px 16px 40px}
+  .card{background:linear-gradient(180deg,var(--panel),#13233a);
+    border:1px solid #25406640; border-radius:16px; padding:14px;
+    box-shadow:0 10px 30px #00040a55; margin-top:14px}
+  canvas{display:block; width:100%; border-radius:12px}
+  #schematic{background:linear-gradient(180deg,#0d1828,#0b1422)}
+  #chart{background:#0b1422}
+  .grid{display:grid; grid-template-columns:1fr 320px; gap:14px}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+  @media(max-width:900px){.grid,.grid2{grid-template-columns:1fr}}
+  .chead{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px}
+  .chead h3{margin:0; color:var(--muted); text-transform:uppercase; letter-spacing:1px; font-size:13px}
+  .controls h3{margin:2px 0 12px; font-size:14px; color:var(--muted);
+    text-transform:uppercase; letter-spacing:1px}
+  .ctl{margin-bottom:14px}
+  .ctl label{display:flex; justify-content:space-between; font-size:13px;
+    margin-bottom:6px; color:var(--ink)}
+  .ctl label b{color:var(--water); font-variant-numeric:tabular-nums}
+  input[type=range]{width:100%; accent-color:var(--water); height:22px}
+  select{width:100%; padding:8px; border-radius:8px; background:var(--panel2);
+    color:var(--ink); border:1px solid #2a456b}
+  .row{display:flex; gap:10px}
+  .row>*{flex:1}
+  .switch{display:flex; align-items:center; gap:10px; cursor:pointer;
+    user-select:none; padding:10px 12px; background:var(--panel2);
+    border-radius:10px; border:1px solid #2a456b}
+  .switch .dot{width:42px; height:24px; border-radius:14px; background:#3a557d;
+    position:relative; transition:.2s}
+  .switch .dot::after{content:""; position:absolute; top:3px; left:3px;
+    width:18px; height:18px; border-radius:50%; background:#fff; transition:.2s}
+  .switch.on .dot{background:var(--green)}
+  .switch.on .dot::after{left:21px}
+  .legend{font-size:12px; color:var(--muted); margin-top:8px; line-height:1.5}
+  .pill{display:inline-block; padding:2px 8px; border-radius:20px;
+    font-size:11px; font-weight:600; margin-left:6px}
+  .badge{font-size:12px;color:var(--muted)}
+  .note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
+  .warn{color:var(--amber)}
+  button.reset{width:100%; padding:10px; border-radius:10px; cursor:pointer;
+    background:var(--accent); color:#fff; border:none; font-weight:600}
+  .statebar{display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; font-size:12px}
+  .statebar span{background:var(--panel2); padding:5px 10px; border-radius:8px;
+    border:1px solid #2a456b}
+  .statebar b{color:var(--water); font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<header>
+  <h1>💧 Cycle-Stop Valve Pump System Simulator</h1>
+  <p>Flint &amp; Walling 3 HP / 35 GPM pump · CSV3A + CSV1A pilot · Amtrol WellXTrol tank · 40/60 switch · live transient model</p>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <canvas id="schematic" width="1140" height="440"></canvas>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline">
+        <h3 style="margin:0;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-size:13px">Downstream pressure &amp; pump cycling</h3>
+        <span class="badge" id="chartlegend">band 40–60 psi · ● pump on</span>
+      </div>
+      <canvas id="chart" width="780" height="220" style="margin-top:10px"></canvas>
+      <div class="statebar" id="statebar"></div>
+      <div class="note" id="explain"></div>
+    </div>
+
+    <div class="card controls">
+      <h3>Controls</h3>
+
+      <div class="ctl">
+        <label>Sprinkler heads <b id="vHeads">6</b></label>
+        <input id="heads" type="range" min="0" max="25" value="6" step="1">
+      </div>
+      <div class="ctl">
+        <label>Head type</label>
+        <select id="headType">
+          <option value="0.19">Spray — small (8–10 ft) · K 0.19</option>
+          <option value="0.48">Spray — large (12–15 ft) · K 0.48</option>
+          <option value="0.29" selected>Rotor — medium (PGP #5) · K 0.29</option>
+          <option value="0.58">Rotor — large (PGP #8) · K 0.58</option>
+        </select>
+      </div>
+
+      <div class="ctl">
+        <label>CSV hold pressure <b id="vCsv">50</b> psi</label>
+        <input id="csv" type="range" min="20" max="70" value="50" step="1">
+      </div>
+
+      <div class="row ctl">
+        <div>
+          <label>Cut-in <b id="vCin">40</b></label>
+          <input id="cin" type="range" min="20" max="55" value="40" step="1">
+        </div>
+        <div>
+          <label>Cut-out <b id="vCout">60</b></label>
+          <input id="cout" type="range" min="45" max="80" value="60" step="1">
+        </div>
+      </div>
+
+      <div class="ctl">
+        <label>Pressure tank</label>
+        <select id="tank">
+          <option value="7.6">WX-103 · 7.6 gal (2.0 drawdown)</option>
+          <option value="14">WX-201 · 14 gal (3.8 drawdown)</option>
+          <option value="20" selected>WX-202 · 20 gal (5.4 drawdown)</option>
+          <option value="34">WX-205 · 34 gal (9.1 drawdown)</option>
+          <option value="44">WX-250 · 44 gal (11.8 drawdown)</option>
+        </select>
+      </div>
+
+      <div class="ctl">
+        <label>Simulation speed <b id="vSpeed">20</b>×</label>
+        <input id="speed" type="range" min="1" max="60" value="20" step="1">
+      </div>
+
+      <div class="ctl">
+        <div class="switch on" id="pumpPower">
+          <div class="dot"></div><div>Pump power (master)</div>
+        </div>
+      </div>
+
+      <button class="reset" id="reset">Reset simulation</button>
+      <div class="note" id="ordering"></div>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="chead">
+        <h3>Pump curve &amp; safe operating range</h3>
+        <span class="badge">F&amp;W 4F35S30 · ● live operating point</span>
+      </div>
+      <canvas id="pumpcurve" width="580" height="320"></canvas>
+      <div class="note" id="pumpnote"></div>
+    </div>
+    <div class="card">
+      <div class="chead">
+        <h3>Cycle-stop valve characteristic</h3>
+        <span class="badge">CSV3A · inlet vs regulated outlet</span>
+      </div>
+      <canvas id="csvcurve" width="580" height="320"></canvas>
+      <div class="note" id="csvnote"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+//=================================================================
+//  PHYSICS MODEL  (pure functions)
+//=================================================================
+const ATM = 14.7;                       // psi atmospheric
+const PSI_PER_FT = 0.4335;
+const STATIC_LIFT_FT = 10;              // cistern lift
+const STATIC_LIFT_PSI = STATIC_LIFT_FT * PSI_PER_FT;   // 4.335 psi
+const KF_FT = 0.022;                    // friction coeff ft/gpm^2 (1.25" PVC,100ft)
+const KF_PSI = KF_FT * PSI_PER_FT;      // ~0.00954 psi/gpm^2
+const CSV_MIN = 5.0;                    // CSV3A minimum continuous bypass (gpm)
+const CSV_MIN_DROP = 7.0;               // CSV3A min friction loss to regulate (psi)
+const CSV_DIFF_MAX = 125;               // single-valve recommended max differential (psi)
+const PUMP_RUNOUT = 50;                 // approx max flow for display clamps
+
+// Pump safe-operating-range bands (GPM) — Hydraulic Institute 9.6.3, BEP=35
+const PUMP_BANDS = { minCont:9, porLo:24.5, bep:35, porHi:42, runout:50, axisMax:52, pMax:180 };
+
+// Pump head-flow curve (Flint & Walling 4F35S30): P(Q) psi, Q gpm
+function pumpPsi(Q){ return 175.9 - 0.05516 * Q*Q; }
+// Pressure available at CSV inlet after lift + pipe friction
+function pumpDischarge(Q){ return pumpPsi(Q) - STATIC_LIFT_PSI - KF_PSI*Q*Q; }
+// Brake horsepower estimate for display
+function pumpBHP(Q){ return Math.max(0.5, 0.9 + 0.052*Q); }
+// Flow the pump delivers when its discharge equals a given downstream pressure
+function pumpFlowAtPressure(P){
+  const C1 = 175.9 - STATIC_LIFT_PSI;          // 171.57
+  const C2 = 0.05516 + KF_PSI;                 // 0.06470
+  const v = (C1 - P)/C2;
+  return v>0 ? Math.sqrt(v) : 0;
+}
+// "Natural" downstream pressure with CSV fully open (pump∩sprinkler operating pt)
+function naturalPressure(A){                    // A = N*K  (zone discharge coeff)
+  const C1 = 175.9 - STATIC_LIFT_PSI;
+  const C2 = 0.05516 + KF_PSI;
+  return C1 / (1 + C2*A*A);
+}
+// Sprinkler zone demand: Q = N*K*sqrt(P)
+function sprinklerDemand(A, P){ return A * Math.sqrt(Math.max(P,0)); }
+
+//=================================================================
+//  SIMULATION STATE
+//=================================================================
+const params = {
+  N:6, K:0.29, csv:50, cin:40, cout:60, Vtank:20, speed:20, power:true
+};
+let S = null;
+function precharge(){ return params.cin - 2; }
+function boyleConst(){ return (precharge()+ATM) * params.Vtank; }   // psia*gal
+function vairAtP(P){ return boyleConst() / (P + ATM); }            // gal of air
+function pFromVair(V){ return boyleConst()/V - ATM; }
+
+function resetSim(){
+  const startP = clamp(params.csv, params.cin+1, params.cout-1);
+  S = {
+    pumpOn: params.power, Pd: startP, Vair: vairAtP(startP),
+    Qpump:0, Qdem:0, Qnet:0, regime:"—", t:0, Pdisch:0, throttle:0, BHP:0,
+    hist:[]   // {t, Pd, on}
+  };
+}
+
+// One physics step. dtMin = elapsed simulated minutes.
+function step(dtMin){
+  const A = params.N * params.K;
+  const setp = params.csv, cin = params.cin, cout = params.cout;
+  const Vtank = params.Vtank;
+  const VairEmpty = Vtank;                       // bladder empty of water
+  const VairFull  = vairAtP(cout + 25);          // hard ceiling clamp
+
+  if(!params.power){ S.pumpOn = false; }
+
+  let Pd = S.Pd, Vair = S.Vair, pumpOn = S.pumpOn;
+  let Qpump=0, Qdem=0, Qnet=0, regime="off";
+  const Pnat = naturalPressure(A);               // CSV-open operating pressure
+  const Qreg = sprinklerDemand(A, setp);         // demand if held at setpoint
+  // CSV can hold setpoint only if pump discharge exceeds it by the min valve drop
+  const canRegulate = pumpDischarge(Qreg) >= setp + CSV_MIN_DROP;
+
+  if(pumpOn){
+    if(canRegulate){
+      // --- CSV CAN HOLD SETPOINT ---
+      if(Pd < setp - 0.05){
+        // pressurizing: pump rides up its curve delivering MORE than demand,
+        // charging the tank/line via Boyle until pressure reaches the setpoint
+        regime = "pressurizing";
+        Qpump = pumpFlowAtPressure(Pd);
+        Qdem  = sprinklerDemand(A, Pd);
+        Qnet  = Qpump - Qdem;                          // >0 into tank
+        Vair  = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+        Pd    = pFromVair(Vair);
+        if(Pd >= setp){ Pd = setp; Vair = vairAtP(setp); }   // arrived
+        Qdem  = sprinklerDemand(A, Pd);
+      } else {
+        Qdem = sprinklerDemand(A, setp);
+        if(Qdem >= CSV_MIN){
+          // pinned: pump runs continuously, tank static at setpoint
+          regime = "regulating";
+          Qpump = Qdem; Qnet = 0;
+          Pd = setp; Vair = vairAtP(setp);
+        } else {
+          // near-zero demand: 5 gpm min bypass over-fills tank toward cut-out
+          regime = "bypass-fill";
+          Qpump = CSV_MIN; Qnet = CSV_MIN - Qdem;     // >0 into tank
+          Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+          Pd = pFromVair(Vair);
+          Qdem = sprinklerDemand(A, Pd);
+        }
+      }
+    } else {
+      // --- OVERDRIVE: demand exceeds pump at setpoint, CSV wide open ---
+      regime = "overdrive";
+      // drain whatever the tank holds, then float at natural pressure
+      Qdem = sprinklerDemand(A, Pd);
+      Qpump = pumpFlowAtPressure(Pd);
+      Qnet = Qpump - Qdem;                            // typically <0
+      Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+      if(Vair >= VairEmpty - 1e-6){
+        // tank empty -> pressure governed by pump/demand equilibrium
+        Pd = Pd + (Pnat - Pd) * Math.min(1, dtMin*8); // relax toward equilibrium
+      } else {
+        Pd = pFromVair(Vair);
+      }
+      Qpump = pumpFlowAtPressure(Pd);
+      Qdem  = sprinklerDemand(A, Pd);
+    }
+  } else {
+    // --- PUMP OFF: tank supplies demand, pressure decays ---
+    regime = params.power ? "pump off" : "powered down";
+    Qpump = 0;
+    Qdem = sprinklerDemand(A, Pd);
+    Qnet = -Qdem;
+    Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+    Pd = pFromVair(Vair);
+    Qdem = sprinklerDemand(A, Pd);
+  }
+
+  // pressure switch (hysteresis = the 40/60 band)
+  if(params.power){
+    if(Pd >= cout) pumpOn = false;
+    else if(Pd <= cin) pumpOn = true;
+  }
+
+  // derived readouts
+  const Pdisch = pumpOn ? pumpDischarge(Qpump) : 0;
+  const throttle = pumpOn ? clamp(1 - Qpump/PUMP_RUNOUT, 0, 1) : 0;  // 1=closed
+
+  S.Pd=Pd; S.Vair=Vair; S.pumpOn=pumpOn;
+  S.Qpump=Qpump; S.Qdem=Qdem; S.Qnet=Qnet; S.regime=regime;
+  S.Pdisch=Math.max(0,Pdisch); S.throttle=throttle; S.BHP=pumpOn?pumpBHP(Qpump):0;
+  S.Pnat=Pnat;
+  S.t += dtMin;
+  S.hist.push({t:S.t, Pd:Pd, on:pumpOn});
+  if(S.hist.length>1600) S.hist.shift();
+}
+
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+
+//=================================================================
+//  RENDER — schematic
+//=================================================================
+const sc = document.getElementById('schematic');
+const sx = sc.getContext('2d');
+let flowPhase = 0;
+
+function drawGauge(g, cx, cy, r, val, max, unit, label, color){
+  // friendly arc gauge
+  const a0 = Math.PI*0.75, a1 = Math.PI*2.25;
+  g.lineWidth = r*0.22;
+  g.lineCap = 'round';
+  g.strokeStyle = '#22344f';
+  g.beginPath(); g.arc(cx,cy,r,a0,a1); g.stroke();
+  const frac = clamp(val/max,0,1);
+  g.strokeStyle = color;
+  g.beginPath(); g.arc(cx,cy,r,a0,a0+(a1-a0)*frac); g.stroke();
+  g.fillStyle = '#eaf2ff';
+  g.font = `bold ${Math.round(r*0.62)}px Segoe UI`;
+  g.textAlign='center'; g.textBaseline='middle';
+  g.fillText(val.toFixed(unit==='gpm'?1:0), cx, cy-2);
+  g.fillStyle = '#9fb3cd';
+  g.font = `${Math.round(r*0.34)}px Segoe UI`;
+  g.fillText(unit, cx, cy+r*0.55);
+  g.fillStyle = '#cfe0f7';
+  g.font = `600 ${Math.round(r*0.40)}px Segoe UI`;
+  g.fillText(label, cx, cy - r - 12);
+}
+
+function pipe(g, x0, y0, x1, y1, gpm, w){
+  g.lineWidth = w; g.lineCap='round'; g.strokeStyle = '#0d1828';
+  g.beginPath(); g.moveTo(x0,y0); g.lineTo(x1,y1); g.stroke();
+  // water fill
+  g.strokeStyle = gpm>0.05 ? '#1d7fd6' : '#33506f';
+  g.lineWidth = w*0.6;
+  g.beginPath(); g.moveTo(x0,y0); g.lineTo(x1,y1); g.stroke();
+  // moving dashes ∝ flow
+  if(gpm>0.05){
+    g.save();
+    g.strokeStyle = '#7fd4ff';
+    g.lineWidth = w*0.32;
+    g.setLineDash([6,12]);
+    g.lineDashOffset = -flowPhase*Math.min(gpm,50)*0.5 - (x0+ y0);
+    g.beginPath(); g.moveTo(x0,y0); g.lineTo(x1,y1); g.stroke();
+    g.restore();
+  }
+}
+
+function drawSchematic(){
+  const g = sx, W=sc.width, H=sc.height;
+  g.clearRect(0,0,W,H);
+  const midY = 250;
+
+  // node x positions
+  const X = {cist:95, pump:330, csv:545, tank:760, spr:1010};
+
+  // ---- pipes ----
+  pipe(g, X.cist+55, midY, X.pump-46, midY, S.Qpump, 16);     // cistern->pump
+  pipe(g, X.pump+46, midY, X.csv-34, midY, S.Qpump, 16);      // pump->csv
+  pipe(g, X.csv+34, midY, X.tank-10, midY, S.Qpump, 16);      // csv->tee
+  pipe(g, X.tank, midY, X.tank, midY+70, Math.max(0,S.Qnet), 14); // tee down to tank
+  pipe(g, X.tank+10, midY, X.spr-40, midY, S.Qdem, 16);       // tee->sprinklers
+
+  // ---- cistern ----
+  g.fillStyle='#13283f'; roundRect(g, X.cist-55, midY-20, 110, 150, 12); g.fill();
+  g.fillStyle='#1d7fd6';
+  roundRect(g, X.cist-48, midY+20, 96, 104, 8); g.fill();
+  g.fillStyle='#39b7ff';
+  g.fillRect(X.cist-48, midY+22, 96, 6);
+  g.fillStyle='#cfe0f7'; g.textAlign='center'; g.font='600 13px Segoe UI';
+  g.fillText('Cistern', X.cist, midY-30);
+  g.fillStyle='#9fb3cd'; g.font='12px Segoe UI';
+  g.fillText('10 ft lift', X.cist, midY+145);
+
+  // ---- pump ----
+  const pumpColor = S.pumpOn ? '#3ddc84' : '#5a6e8c';
+  g.fillStyle='#15273e'; circle(g, X.pump, midY, 46); g.fill();
+  g.lineWidth=4; g.strokeStyle=pumpColor; circle(g, X.pump, midY, 46); g.stroke();
+  // impeller
+  g.save(); g.translate(X.pump,midY); g.rotate(flowPhase*(S.pumpOn?S.Qpump*0.04+0.3:0));
+  g.strokeStyle=pumpColor; g.lineWidth=4;
+  for(let i=0;i<4;i++){ g.rotate(Math.PI/2); g.beginPath(); g.moveTo(0,0); g.quadraticCurveTo(20,6,30,0); g.stroke(); }
+  g.restore();
+  g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI';
+  g.fillText('PUMP', X.pump, midY-62);
+  g.fillStyle=S.pumpOn?'#3ddc84':'#ff5d6c'; g.font='bold 12px Segoe UI';
+  g.fillText(S.pumpOn?'● RUNNING':'○ OFF', X.pump, midY+64);
+  g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+  g.fillText(S.BHP.toFixed(1)+' HP', X.pump, midY+80);
+  // gauges right at the pump
+  drawGauge(g, X.pump-34, midY-150, 30, S.Pdisch, 180, 'psi', 'pump P', '#ffc24b');
+  drawGauge(g, X.pump+34, midY-150, 30, S.Qpump, 50, 'gpm', 'pump Q', '#39b7ff');
+
+  // ---- CSV ----
+  g.fillStyle='#15273e'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.fill();
+  g.lineWidth=3; g.strokeStyle='#7c5cff'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.stroke();
+  // throttle plate
+  g.save(); g.translate(X.csv,midY);
+  const openAng = (1-S.throttle)*Math.PI*0.42;
+  g.strokeStyle='#b9a8ff'; g.lineWidth=5; g.lineCap='round';
+  g.beginPath(); g.moveTo(-18*Math.cos(openAng),-18*Math.sin(openAng));
+  g.lineTo(18*Math.cos(openAng),18*Math.sin(openAng)); g.stroke();
+  g.restore();
+  g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI';
+  g.fillText('CSV3A', X.csv, midY-44);
+  g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+  g.fillText(S.pumpOn?(Math.round((1-S.throttle)*100)+'% open'):'—', X.csv, midY+48);
+  g.fillText('hold '+params.csv+' psi', X.csv, midY+62);
+
+  // ---- pressure tank ----
+  g.fillStyle='#13283f'; roundRect(g, X.tank-38, midY+40, 76, 120, 12); g.fill();
+  const waterFrac = clamp((params.Vtank - S.Vair)/Math.max(params.Vtank-vairAtP(params.cout),0.1),0,1);
+  const wh = 110*waterFrac;
+  g.fillStyle='#1d7fd6';
+  roundRect(g, X.tank-32, midY+154-wh, 64, wh, 6); g.fill();
+  g.fillStyle='#39b7ff'; g.fillRect(X.tank-32, midY+154-wh, 64, Math.min(5,wh));
+  g.strokeStyle='#2a456b'; g.lineWidth=2; roundRect(g, X.tank-38, midY+40, 76, 120, 12); g.stroke();
+  g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI'; g.textAlign='center';
+  g.fillText('TANK', X.tank, midY+34);
+  g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+  g.fillText((params.Vtank-S.Vair).toFixed(1)+' gal', X.tank, midY+176);
+  // switch + gauge above tee
+  drawGauge(g, X.tank, midY-150, 34, S.Pd, 80, 'psi', 'system P', pressColor(S.Pd));
+  g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+  g.fillText(params.cin+'/'+params.cout+' switch', X.tank, midY-100);
+
+  // ---- sprinklers ----
+  g.fillStyle='#15273e'; roundRect(g, X.spr-44, midY-6, 88, 14, 6); g.fill();  // manifold
+  const heads = Math.max(1, params.N);
+  for(let i=0;i<heads;i++){
+    const hx = X.spr-36 + (heads>1? i*(72/(heads-1)) : 36);
+    g.strokeStyle='#5a6e8c'; g.lineWidth=3;
+    g.beginPath(); g.moveTo(hx,midY-6); g.lineTo(hx,midY-22); g.stroke();
+    // spray arcs ∝ pressure
+    if(S.Qdem>0.05 && params.N>0){
+      const reach = clamp(S.Pd/45,0.2,1.4)*22;
+      g.strokeStyle='rgba(127,212,255,'+clamp(S.Pd/50,0.2,0.9)+')';
+      g.lineWidth=2;
+      for(let s=-2;s<=2;s++){
+        g.beginPath();
+        const ang=-Math.PI/2 + s*0.32;
+        const dx=Math.cos(ang)*reach, dy=Math.sin(ang)*reach;
+        g.moveTo(hx,midY-22);
+        g.quadraticCurveTo(hx+dx*0.6, midY-22+dy*1.4, hx+dx, midY-22+dy+8);
+        g.stroke();
+      }
+    }
+  }
+  g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI';
+  g.fillText('SPRINKLERS', X.spr, midY+30);
+  g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+  g.fillText(params.N+' heads', X.spr, midY+46);
+  drawGauge(g, X.spr-34, midY-150, 30, S.Pd, 80, 'psi', 'head P', pressColor(S.Pd));
+  drawGauge(g, X.spr+34, midY-150, 30, S.Qdem, 50, 'gpm', 'zone Q', '#39b7ff');
+}
+
+function pressColor(p){
+  if(p < params.cin-3) return '#ff5d6c';
+  if(p > params.cout+3) return '#ff5d6c';
+  return '#3ddc84';
+}
+function roundRect(g,x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y);
+  g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r);
+  g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
+function circle(g,x,y,r){ g.beginPath(); g.arc(x,y,r,0,Math.PI*2); }
+
+//=================================================================
+//  RENDER — chart
+//=================================================================
+const ch = document.getElementById('chart');
+const cx = ch.getContext('2d');
+function drawChart(){
+  const g=cx, W=ch.width, H=ch.height, pad=30;
+  g.clearRect(0,0,W,H);
+  const pMin=20, pMax=80;
+  const y = p => H-pad - (p-pMin)/(pMax-pMin)*(H-2*pad);
+  // band
+  g.fillStyle='rgba(61,220,132,0.10)';
+  g.fillRect(pad, y(params.cout), W-2*pad, y(params.cin)-y(params.cout));
+  // grid lines cut-in/out/csv
+  [['cut-out',params.cout,'#3ddc84'],['cut-in',params.cin,'#3ddc84'],['CSV',params.csv,'#7c5cff']]
+   .forEach(([lab,p,c])=>{
+    g.strokeStyle=c+'66'; g.lineWidth=1; g.setLineDash([4,4]);
+    g.beginPath(); g.moveTo(pad,y(p)); g.lineTo(W-pad,y(p)); g.stroke(); g.setLineDash([]);
+    g.fillStyle=c; g.font='10px Segoe UI'; g.textAlign='left';
+    g.fillText(lab+' '+p, W-pad+2-58, y(p)-3);
+  });
+  const h=S.hist; if(h.length<2){ axisLabels(g,H,pad,pMin,pMax,y); return; }
+  const t0=h[0].t, t1=h[h.length-1].t, span=Math.max(t1-t0,0.001);
+  const xx = t => pad + (t-t0)/span*(W-2*pad);
+  // pump-on shading
+  g.fillStyle='rgba(57,183,255,0.08)';
+  for(let i=1;i<h.length;i++){ if(h[i].on){ g.fillRect(xx(h[i-1].t),pad,Math.max(1,xx(h[i].t)-xx(h[i-1].t)),H-2*pad);} }
+  // pressure line
+  g.strokeStyle='#39b7ff'; g.lineWidth=2; g.beginPath();
+  for(let i=0;i<h.length;i++){ const X=xx(h[i].t),Y=y(clamp(h[i].Pd,pMin,pMax)); i?g.lineTo(X,Y):g.moveTo(X,Y);} g.stroke();
+  // pump on/off trace (bottom)
+  g.strokeStyle='#3ddc84'; g.lineWidth=2; g.beginPath();
+  for(let i=0;i<h.length;i++){ const X=xx(h[i].t), Y=H-8-(h[i].on?10:0); i?g.lineTo(X,Y):g.moveTo(X,Y);} g.stroke();
+  axisLabels(g,H,pad,pMin,pMax,y);
+}
+function axisLabels(g,H,pad,pMin,pMax,y){
+  g.fillStyle='#9fb3cd'; g.font='10px Segoe UI'; g.textAlign='right';
+  [20,40,60,80].forEach(p=>g.fillText(p, pad-4, y(p)+3));
+}
+
+//=================================================================
+//  RENDER — pump curve & safe operating range
+//=================================================================
+const COL = { red:'rgba(255,93,108,', amber:'rgba(255,194,75,', green:'rgba(61,220,132,' };
+const pcv = document.getElementById('pumpcurve');
+const pcx = pcv.getContext('2d');
+function drawPumpCurve(){
+  const g=pcx, W=pcv.width, H=pcv.height, L=48, R=14, T=18, B=34;
+  const B_ = PUMP_BANDS, Qm=B_.axisMax, Pm=B_.pMax;
+  g.clearRect(0,0,W,H);
+  const X=q=>L+q/Qm*(W-L-R), Y=p=>H-B-p/Pm*(H-T-B);
+  const band=(q0,q1,c)=>{ g.fillStyle=c; g.fillRect(X(q0),T,X(Math.min(q1,Qm))-X(q0),H-T-B); };
+  // safe/unsafe colour-coded flow bands (Hydraulic Institute 9.6.3)
+  band(0,B_.minCont,        COL.red+'0.14)');     // deadhead / low-flow
+  band(B_.minCont,B_.porLo, COL.amber+'0.12)');   // allowable (below preferred)
+  band(B_.porLo,B_.porHi,   COL.green+'0.15)');   // preferred operating region
+  band(B_.porHi,B_.runout,  COL.amber+'0.12)');   // allowable (approaching runout)
+  band(B_.runout,Qm,        COL.red+'0.14)');     // past runout
+  // grid + axis labels
+  g.strokeStyle='#22344f'; g.lineWidth=1; g.font='10px Segoe UI';
+  for(let p=0;p<=Pm;p+=30){ g.beginPath(); g.moveTo(L,Y(p)); g.lineTo(W-R,Y(p)); g.stroke();
+    g.fillStyle='#9fb3cd'; g.textAlign='right'; g.fillText(p,L-5,Y(p)+3); }
+  for(let q=0;q<=Qm;q+=10){ g.fillStyle='#9fb3cd'; g.textAlign='center'; g.fillText(q,X(q),H-B+13); }
+  g.fillStyle='#cfe0f7'; g.textAlign='center'; g.font='11px Segoe UI';
+  g.fillText('Flow (GPM)', (L+W-R)/2, H-4);
+  g.save(); g.translate(13,(T+H-B)/2); g.rotate(-Math.PI/2); g.fillText('Pump pressure (psi)',0,0); g.restore();
+  // zone labels
+  g.font='9px Segoe UI'; g.textAlign='center';
+  g.fillStyle='#ff8b96'; g.fillText('min flow', X(B_.minCont/2), T+11);
+  g.fillStyle='#7ee0a4'; g.fillText('preferred', X((B_.porLo+B_.porHi)/2), T+11);
+  g.fillStyle='#ffd281'; g.fillText('runout', X((B_.runout+Qm)/2), T+11);
+  // pump curve
+  g.strokeStyle='#7c5cff'; g.lineWidth=2.5; g.beginPath();
+  for(let q=0;q<=Qm;q+=0.5){ const p=pumpPsi(q),xx=X(q),yy=Y(p); q?g.lineTo(xx,yy):g.moveTo(xx,yy);} g.stroke();
+  // BEP marker
+  const bx=X(B_.bep), by=Y(pumpPsi(B_.bep));
+  g.fillStyle='#eaf2ff'; circle(g,bx,by,3); g.fill();
+  g.fillStyle='#cfe0f7'; g.font='9px Segoe UI'; g.textAlign='center'; g.fillText('BEP 35', bx, by-7);
+  // live operating point
+  if(S.pumpOn){
+    const q=clamp(S.Qpump,0,Qm), p=pumpPsi(q), ox=X(q), oy=Y(p);
+    g.strokeStyle='#ffffff55'; g.setLineDash([3,3]); g.lineWidth=1;
+    g.beginPath(); g.moveTo(ox,oy); g.lineTo(ox,H-B); g.stroke();
+    g.beginPath(); g.moveTo(ox,oy); g.lineTo(L,oy); g.stroke(); g.setLineDash([]);
+    const safe = q>=B_.minCont && q<=B_.runout;
+    g.fillStyle = (q>=B_.porLo&&q<=B_.porHi)?'#3ddc84':(safe?'#ffc24b':'#ff5d6c');
+    g.strokeStyle='#fff'; g.lineWidth=2; circle(g,ox,oy,6); g.fill(); g.stroke();
+  } else {
+    const ox=X(0),oy=Y(pumpPsi(0));
+    g.strokeStyle='#5a6e8c'; g.lineWidth=2; circle(g,ox,oy,6); g.stroke();
+  }
+}
+
+//=================================================================
+//  RENDER — cycle-stop valve characteristic
+//=================================================================
+const csvc = document.getElementById('csvcurve');
+const cvx = csvc.getContext('2d');
+function drawCsvCurve(){
+  const g=cvx, W=csvc.width, H=csvc.height, L=48, R=14, T=18, B=34;
+  const Qm=PUMP_BANDS.axisMax, Pm=PUMP_BANDS.pMax, setp=params.csv;
+  g.clearRect(0,0,W,H);
+  const X=q=>L+q/Qm*(W-L-R), Y=p=>H-B-p/Pm*(H-T-B);
+  // regulating range: 5 gpm min bypass up to where pump discharge falls to setp+min drop
+  let QregMax=0; for(let q=Qm;q>=0;q-=0.25){ if(pumpDischarge(q)>=setp+CSV_MIN_DROP){ QregMax=q; break; } }
+  const band=(q0,q1,c)=>{ if(q1<=q0)return; g.fillStyle=c; g.fillRect(X(q0),T,X(Math.min(q1,Qm))-X(q0),H-T-B); };
+  // colour-coded operating zones along flow
+  band(0,CSV_MIN,        COL.amber+'0.12)');   // below min bypass -> cycling
+  band(CSV_MIN,QregMax,  COL.green+'0.15)');   // regulating band (holds setpoint)
+  band(QregMax,Qm,       COL.red+'0.14)');     // overdrive -> regulation lost
+  // grid + axes
+  g.strokeStyle='#22344f'; g.lineWidth=1; g.font='10px Segoe UI';
+  for(let p=0;p<=Pm;p+=30){ g.beginPath(); g.moveTo(L,Y(p)); g.lineTo(W-R,Y(p)); g.stroke();
+    g.fillStyle='#9fb3cd'; g.textAlign='right'; g.fillText(p,L-5,Y(p)+3); }
+  for(let q=0;q<=Qm;q+=10){ g.fillStyle='#9fb3cd'; g.textAlign='center'; g.fillText(q,X(q),H-B+13); }
+  g.fillStyle='#cfe0f7'; g.textAlign='center'; g.font='11px Segoe UI';
+  g.fillText('Flow (GPM)', (L+W-R)/2, H-4);
+  g.save(); g.translate(13,(T+H-B)/2); g.rotate(-Math.PI/2); g.fillText('Pressure (psi)',0,0); g.restore();
+  // inlet curve = pump discharge at CSV inlet
+  g.strokeStyle='#ffc24b'; g.lineWidth=2; g.beginPath();
+  for(let q=0;q<=Qm;q+=0.5){ const p=Math.max(0,pumpDischarge(q)),xx=X(q),yy=Y(p); q?g.lineTo(xx,yy):g.moveTo(xx,yy);} g.stroke();
+  // outlet (regulated) line: flat at setpoint over regulating range, then follows inlet (droop)
+  g.strokeStyle='#39b7ff'; g.lineWidth=2.5; g.beginPath();
+  g.moveTo(X(CSV_MIN),Y(setp)); g.lineTo(X(QregMax),Y(setp));
+  for(let q=QregMax;q<=Qm;q+=0.5){ g.lineTo(X(q),Y(Math.max(0,pumpDischarge(q)))); } g.stroke();
+  // bypass-zone outlet (dashed, below 5 gpm it fills tank toward cut-out)
+  g.setLineDash([4,3]); g.strokeStyle='#7c5cff';
+  g.beginPath(); g.moveTo(X(0),Y(params.cout)); g.lineTo(X(CSV_MIN),Y(setp)); g.stroke(); g.setLineDash([]);
+  // setpoint + zone labels
+  g.font='9px Segoe UI'; g.textAlign='center';
+  g.fillStyle='#ffd281'; g.fillText('cycling', X(CSV_MIN/2), T+11);
+  g.fillStyle='#7ee0a4'; g.fillText('regulating', X((CSV_MIN+QregMax)/2), T+11);
+  if(QregMax<Qm-3){ g.fillStyle='#ff8b96'; g.fillText('overdrive', X((QregMax+Qm)/2), T+11); }
+  g.fillStyle='#9fdcff'; g.textAlign='left'; g.fillText('outlet '+setp+' psi', X(CSV_MIN)+4, Y(setp)-4);
+  g.fillStyle='#ffc24b'; g.fillText('inlet (pump)', X(2)+2, Y(pumpDischarge(2))-4);
+  // live operating point: inlet & outlet + throttle gap
+  if(S.pumpOn){
+    const q=clamp(S.Qpump,0,Qm), pin=Math.max(0,pumpDischarge(q)), pout=clamp(S.Pd,0,Pm);
+    const ox=X(q);
+    // throttle-drop connector
+    g.strokeStyle='#ffffff44'; g.lineWidth=6; g.lineCap='round';
+    g.beginPath(); g.moveTo(ox,Y(pin)); g.lineTo(ox,Y(pout)); g.stroke();
+    // inlet point
+    g.fillStyle='#ffc24b'; g.strokeStyle='#fff'; g.lineWidth=1.5; circle(g,ox,Y(pin),5); g.fill(); g.stroke();
+    // outlet point
+    const reg = q>=CSV_MIN && q<=QregMax;
+    g.fillStyle = reg?'#3ddc84':(q<CSV_MIN?'#ffc24b':'#ff5d6c');
+    g.strokeStyle='#fff'; g.lineWidth=2; circle(g,ox,Y(pout),6); g.fill(); g.stroke();
+  }
+}
+
+//=================================================================
+//  UI WIRING
+//=================================================================
+function bind(id, fn){ const e=document.getElementById(id); e.addEventListener('input',()=>fn(e)); }
+bind('heads', e=>{ params.N=+e.value; document.getElementById('vHeads').textContent=e.value; });
+bind('headType', e=>{ params.K=+e.value; });
+bind('csv', e=>{ params.csv=+e.value; document.getElementById('vCsv').textContent=e.value; enforceOrder(); });
+bind('cin', e=>{ params.cin=+e.value; enforceOrder(); });
+bind('cout', e=>{ params.cout=+e.value; enforceOrder(); });
+bind('tank', e=>{ params.Vtank=+e.value; });
+bind('speed', e=>{ params.speed=+e.value; document.getElementById('vSpeed').textContent=e.value; });
+document.getElementById('pumpPower').addEventListener('click', function(){
+  params.power=!params.power; this.classList.toggle('on',params.power);
+});
+document.getElementById('reset').addEventListener('click', resetSim);
+
+function enforceOrder(){
+  // required ordering: precharge(cin-2) < cin < csv < cout
+  const cin=document.getElementById('cin'), cout=document.getElementById('cout'), csv=document.getElementById('csv');
+  if(params.cin >= params.csv){ params.cin = params.csv-1; cin.value=params.cin; }
+  if(params.cout <= params.csv){ params.cout = params.csv+1; cout.value=params.cout; }
+  if(params.csv <= params.cin){ params.csv = params.cin+1; csv.value=params.csv; }
+  document.getElementById('vCin').textContent=params.cin;
+  document.getElementById('vCout').textContent=params.cout;
+  document.getElementById('vCsv').textContent=params.csv;
+  const ok = (params.cin-2) < params.cin && params.cin < params.csv && params.csv < params.cout;
+  document.getElementById('ordering').innerHTML =
+    `Required ordering precharge <b>${params.cin-2}</b> &lt; cut-in <b>${params.cin}</b> &lt; CSV <b>${params.csv}</b> &lt; cut-out <b>${params.cout}</b> psi `
+    + (ok?'<span class="pill" style="background:#173">✓ valid</span>':'<span class="pill" style="background:#722">adjusted</span>');
+}
+
+function updateText(){
+  const sb=document.getElementById('statebar');
+  sb.innerHTML =
+    `<span>state <b>${S.regime}</b></span>`+
+    `<span>pump P <b>${S.Pdisch.toFixed(0)}</b> psi</span>`+
+    `<span>pump Q <b>${S.Qpump.toFixed(1)}</b> gpm</span>`+
+    `<span>system P <b>${S.Pd.toFixed(1)}</b> psi</span>`+
+    `<span>zone Q <b>${S.Qdem.toFixed(1)}</b> gpm</span>`+
+    `<span>tank <b>${(params.Vtank-S.Vair).toFixed(1)}</b> gal</span>`;
+  let msg='';
+  const A=params.N*params.K, Qset=sprinklerDemand(A,params.csv);
+  if(!params.power) msg='Pump powered down — tank drains to demand, then sits empty.';
+  else if(S.regime==='regulating') msg=`Active demand ${Qset.toFixed(1)} gpm ≥ 5 gpm bypass. CSV throttles the pump up its curve (pump reads ${S.Pdisch.toFixed(0)} psi) to hold the system at ${params.csv} psi. <b>Pump runs continuously — no cycling.</b>`;
+  else if(S.regime==='bypass-fill') msg=`Demand ${Qset.toFixed(1)} gpm is below the 5 gpm CSV minimum. The bypass over-fills the tank toward cut-out; the pump will shut off at ${params.cout} psi, then slowly cycle. <span class="warn">This residual cycling at near-zero demand is expected CSV behavior.</span>`;
+  else if(S.regime==='overdrive') msg=`Demand exceeds what the pump can deliver at ${params.csv} psi. CSV is wide open, can't regulate — system pressure falls to ~${S.Pnat.toFixed(0)} psi and the pump runs flat out. Reduce heads to restore regulation.`;
+  else if(S.regime==='pump off') msg=`Pump off. Tank drawdown supplies demand; pressure falls toward cut-in (${params.cin} psi), where the pump restarts.`;
+  document.getElementById('explain').innerHTML=msg;
+
+  // pump-curve note
+  const B_=PUMP_BANDS, q=S.Qpump;
+  let pn;
+  if(!S.pumpOn) pn='Pump off — sitting at shutoff head (0 gpm). No flow work.';
+  else {
+    const zone = q<B_.minCont ? '<span class="warn">⚠ below min continuous flow — deadhead/recirculation risk</span>'
+      : q>B_.runout ? '<span style="color:var(--red)">⚠ past runout — motor-overload risk</span>'
+      : (q>=B_.porLo&&q<=B_.porHi) ? '<span style="color:var(--green)">in the preferred operating region (70–120% BEP)</span>'
+      : '<span class="warn">in the allowable region (outside preferred)</span>';
+    pn=`Operating at <b>${q.toFixed(1)} gpm / ${S.Pdisch.toFixed(0)} psi</b> — ${zone}. `
+      + (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.');
+  }
+  document.getElementById('pumpnote').innerHTML=pn;
+
+  // csv note
+  let cn;
+  if(!S.pumpOn) cn='Pump off — valve idle. Tank holds system pressure.';
+  else if(S.regime==='overdrive') cn=`<span style="color:var(--red)">Overdrive:</span> demand exceeds pump capacity at ${params.csv} psi, so the valve is wide open and can no longer hold the setpoint — outlet has dropped to ~${S.Pd.toFixed(0)} psi (follows the pump curve).`;
+  else if(q<CSV_MIN) cn=`Below the 5 gpm minimum — valve at min bypass, filling the tank. Outlet rides above setpoint toward cut-out.`;
+  else cn=`<span style="color:var(--green)">Regulating:</span> inlet <b>${S.Pdisch.toFixed(0)} psi</b> → outlet held at <b>${params.csv} psi</b>. The valve is absorbing <b>${Math.max(0,S.Pdisch-params.csv).toFixed(0)} psi</b> of throttling drop at ${q.toFixed(1)} gpm.`;
+  document.getElementById('csvnote').innerHTML=cn;
+}
+
+//=================================================================
+//  MAIN LOOP
+//=================================================================
+let last=performance.now();
+function frame(now){
+  let dtReal=(now-last)/1000; last=now;
+  dtReal=Math.min(dtReal,0.05);
+  flowPhase += dtReal*4;
+  // sim minutes elapsed: speed× means 1 real sec = speed sim-sec
+  const dtMin = dtReal * params.speed / 60;
+  // substep for stability
+  const steps=Math.max(1,Math.ceil(dtMin/0.02));
+  for(let i=0;i<steps;i++) step(dtMin/steps);
+  drawSchematic(); drawChart(); drawPumpCurve(); drawCsvCurve(); updateText();
+  requestAnimationFrame(frame);
+}
+
+//=================================================================
+//  SELF-TESTS (console)
+//=================================================================
+function selfTest(){
+  const approx=(a,b,t,m)=>{ const ok=Math.abs(a-b)<=t; console.log((ok?'✓':'✗')+' '+m+`  (${a.toFixed(2)} vs ${b})`); return ok; };
+  console.log('%c--- pump-sim self-tests ---','color:#7fd4ff');
+  approx(pumpPsi(35), 108.2, 1.5, 'pump 35gpm ≈ 108 psi (250 ft)');
+  approx(pumpPsi(0), 175.9, 0.5, 'pump shutoff ≈ 176 psi');
+  // sprinkler scales as sqrt(P)
+  approx(sprinklerDemand(1,40)/sprinklerDemand(1,10), 2, 0.01, 'Q ∝ √P (×4 P → ×2 Q)');
+  // Boyle drawdown WX-202 @40/60 ≈ 5.4 gal
+  const P0=(40-2)+ATM, Vt=20;
+  const draw = Vt*P0*(1/(40+ATM)-1/(60+ATM));
+  approx(draw, 5.4, 0.6, 'WX-202 drawdown @40/60 ≈ 5.4 gal');
+  // natural pressure with 0 heads = near shutoff-minus-lift
+  approx(naturalPressure(0), 171.6, 1, 'no-load pressure ≈ shutoff − lift');
+}
+
+//=================================================================
+resetSim(); enforceOrder(); selfTest();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
