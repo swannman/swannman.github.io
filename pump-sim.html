@@ -7,9 +7,12 @@
 <!--
   Cycle-Stop Valve Pump System Simulator — single-file, no dependencies.
   Calibrated to real products. Sources (researched 2026-06-26):
-    PUMP  Flint & Walling 4F35S30 (3HP/35GPM); curve anchored to Goulds 35GS30 class.
-          H(Q)=406-0.1273*Q^2 ft ; rated 35gpm@250ft ; shutoff 406ft/175.9psi.
-          deanbennettsupply.com, aquascience.net (35GS30 176psi shutoff)
+    PUMP  Flint & Walling 4F35S30 (3HP/35GPM, 10-stage). Curve digitized directly
+          from the published F&W 4" submersible catalog capacity table (p.10, 4F35
+          family): max pressure 355ft/154psi at shutoff; recommended range 20-50 GPM.
+          Quadratic H(Q)=154-0.05302*Q^2 psi reproduces the published shutoff exactly
+          and matches the 20/40/60-psi discharge columns to <3 psi rms (the 0-psi
+          column is an outlier and is excluded). flintandwalling.com FW1674 catalog.
     CSV   Cycle Stop Valves CSV3A + CSV1A pilot. Min continuous flow 5 GPM.
           Holds constant downstream pressure; pilot 15-150psi. cyclestopvalves.com
     TANK  Amtrol WellXTrol. Boyle's law drawdown; precharge = cut-in - 2.
@@ -226,19 +229,21 @@ const CSV_MIN_DROP = 7.0;               // CSV3A min friction loss to regulate (
 const CSV_DIFF_MAX = 125;               // single-valve recommended max differential (psi)
 const PUMP_RUNOUT = 50;                 // approx max flow for display clamps
 
-// Pump safe-operating-range bands (GPM) — Hydraulic Institute 9.6.3, BEP=35
-const PUMP_BANDS = { minCont:9, porLo:24.5, bep:35, porHi:42, runout:50, axisMax:52, pMax:180 };
+// Pump operating-range bands (GPM) — Flint & Walling published recommended range
+// 20-50 GPM (catalog p.10); BEP=35 (4F35 series nominal). Outside 20-50 = not recommended.
+const PUMP_BANDS = { minCont:20, porLo:20, bep:35, porHi:50, runout:50, axisMax:52, pMax:160 };
 
-// Pump head-flow curve (Flint & Walling 4F35S30): P(Q) psi, Q gpm
-function pumpPsi(Q){ return 175.9 - 0.05516 * Q*Q; }
+// Pump head-flow curve (Flint & Walling 4F35S30): P(Q) psi, Q gpm.
+// Digitized from the published catalog table — shutoff 154 psi (355 ft), see header.
+function pumpPsi(Q){ return 154.0 - 0.05302 * Q*Q; }
 // Pressure available at CSV inlet after lift + pipe friction
 function pumpDischarge(Q){ return pumpPsi(Q) - STATIC_LIFT_PSI - KF_PSI*Q*Q; }
 // Brake horsepower estimate for display
 function pumpBHP(Q){ return Math.max(0.5, 0.9 + 0.052*Q); }
 // Flow the pump delivers when its discharge equals a given downstream pressure
 function pumpFlowAtPressure(P){
-  const C1 = 175.9 - STATIC_LIFT_PSI;          // 171.57
-  const C2 = 0.05516 + KF_PSI;                 // 0.06470
+  const C1 = 154.0 - STATIC_LIFT_PSI;          // 149.67
+  const C2 = 0.05302 + KF_PSI;                 // 0.06256
   const v = (C1 - P)/C2;
   return v>0 ? Math.sqrt(v) : 0;
 }
@@ -727,12 +732,12 @@ function drawPumpCurve(){
   g.clearRect(0,0,W,H);
   const X=q=>L+q/Qm*(W-L-R), Y=p=>H-B-p/Pm*(H-T-B);
   const band=(q0,q1,c)=>{ g.fillStyle=c; g.fillRect(X(q0),T,X(Math.min(q1,Qm))-X(q0),H-T-B); };
-  // safe/unsafe colour-coded flow bands (Hydraulic Institute 9.6.3)
-  band(0,B_.minCont,        COL.red+'0.14)');     // deadhead / low-flow
-  band(B_.minCont,B_.porLo, COL.amber+'0.12)');   // allowable (below preferred)
-  band(B_.porLo,B_.porHi,   COL.green+'0.15)');   // preferred operating region
-  band(B_.porHi,B_.runout,  COL.amber+'0.12)');   // allowable (approaching runout)
-  band(B_.runout,Qm,        COL.red+'0.14)');     // past runout
+  // colour-coded flow bands — Flint & Walling published recommended range 20-50 GPM
+  band(0,B_.minCont,        COL.red+'0.14)');     // below 20 GPM — not recommended
+  band(B_.minCont,B_.porLo, COL.amber+'0.12)');   // (nil: minCont==porLo)
+  band(B_.porLo,B_.porHi,   COL.green+'0.15)');   // recommended operating range 20-50
+  band(B_.porHi,B_.runout,  COL.amber+'0.12)');   // (nil: porHi==runout)
+  band(B_.runout,Qm,        COL.red+'0.14)');     // past 50 GPM — runout
   // grid + axis labels
   g.strokeStyle='#22344f'; g.lineWidth=1; g.font='10px Segoe UI';
   for(let p=0;p<=Pm;p+=30){ g.beginPath(); g.moveTo(L,Y(p)); g.lineTo(W-R,Y(p)); g.stroke();
@@ -743,9 +748,9 @@ function drawPumpCurve(){
   g.save(); g.translate(13,(T+H-B)/2); g.rotate(-Math.PI/2); g.fillText('Pump pressure (psi)',0,0); g.restore();
   // zone labels
   g.font='9px Segoe UI'; g.textAlign='center';
-  g.fillStyle='#ff8b96'; g.fillText('min flow', X(B_.minCont/2), T+11);
-  g.fillStyle='#7ee0a4'; g.fillText('preferred', X((B_.porLo+B_.porHi)/2), T+11);
-  g.fillStyle='#ffd281'; g.fillText('runout', X((B_.runout+Qm)/2), T+11);
+  g.fillStyle='#ff8b96'; g.fillText('below 20', X(B_.minCont/2), T+11);
+  g.fillStyle='#7ee0a4'; g.fillText('recommended 20–50', X((B_.porLo+B_.porHi)/2), T+11);
+  g.fillStyle='#ff8b96'; g.fillText('runout', X((B_.runout+Qm)/2), T+11);
   // pump curve
   g.strokeStyle='#7c5cff'; g.lineWidth=2.5; g.beginPath();
   for(let q=0;q<=Qm;q+=0.5){ const p=pumpPsi(q),xx=X(q),yy=Y(p); q?g.lineTo(xx,yy):g.moveTo(xx,yy);} g.stroke();
@@ -949,10 +954,9 @@ function updateText(){
   let pn;
   if(!S.pumpOn) pn='Pump off — sitting at shutoff head (0 gpm). No flow work.';
   else {
-    const zone = q<B_.minCont ? '<span class="warn">⚠ below min continuous flow — deadhead/recirculation risk</span>'
-      : q>B_.runout ? '<span style="color:var(--red)">⚠ past runout — motor-overload risk</span>'
-      : (q>=B_.porLo&&q<=B_.porHi) ? '<span style="color:var(--green)">in the preferred operating region (70–120% BEP)</span>'
-      : '<span class="warn">in the allowable region (outside preferred)</span>';
+    const zone = q<B_.minCont ? '<span class="warn">⚠ below F&W\'s 20 GPM recommended minimum</span>'
+      : q>B_.runout ? '<span style="color:var(--red)">⚠ above the 50 GPM recommended maximum — past runout</span>'
+      : '<span style="color:var(--green)">within F&W\'s recommended 20–50 GPM range</span>';
     pn=`Operating at <b>${q.toFixed(1)} gpm / ${S.Ppump.toFixed(0)} psi</b> — ${zone}. `
       + (params.mode==='csv' ? (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.')
          : params.mode==='return' ? 'Return line: pump runs at the high-flow end, recirculating the excess.'
@@ -997,8 +1001,11 @@ function frame(now){
 function selfTest(){
   const approx=(a,b,t,m)=>{ const ok=Math.abs(a-b)<=t; console.log((ok?'✓':'✗')+' '+m+`  (${a.toFixed(2)} vs ${b})`); return ok; };
   console.log('%c--- pump-sim self-tests ---','color:#7fd4ff');
-  approx(pumpPsi(35), 108.2, 1.5, 'pump 35gpm ≈ 108 psi (250 ft)');
-  approx(pumpPsi(0), 175.9, 0.5, 'pump shutoff ≈ 176 psi');
+  approx(pumpPsi(35), 89.0, 1.5, 'pump 35gpm ≈ 89 psi (205 ft)');
+  approx(pumpPsi(0), 154.0, 0.5, 'pump shutoff ≈ 154 psi (355 ft, F&W max pressure)');
+  // curve reproduces published F&W 4F35S30 table points (head in ft)
+  approx(pumpPsi(45)/PSI_PER_FT, 108, 6, 'F&W 45gpm ≈ 108 ft (table)');
+  approx(pumpPsi(28)/PSI_PER_FT, 258, 8, 'F&W 28gpm ≈ 258 ft (table)');
   // sprinkler scales as sqrt(P)
   approx(sprinklerDemand(1,40)/sprinklerDemand(1,10), 2, 0.01, 'Q ∝ √P (×4 P → ×2 Q)');
   // Boyle drawdown WX-202 @40/60 ≈ 5.4 gal
@@ -1006,7 +1013,7 @@ function selfTest(){
   const draw = Vt*P0*(1/(40+ATM)-1/(60+ATM));
   approx(draw, 5.4, 0.6, 'WX-202 drawdown @40/60 ≈ 5.4 gal');
   // natural pressure with 0 heads = near shutoff-minus-lift
-  approx(naturalPressure(0), 171.6, 1, 'no-load pressure ≈ shutoff − lift');
+  approx(naturalPressure(0), 149.7, 1, 'no-load pressure ≈ shutoff − lift');
   // elevation: +100 ft above pump removes ~43 psi of head pressure
   params.elev=100; const dHi=solveDemand(2, 50);
   params.elev=0;   const d0=solveDemand(2, 50);
