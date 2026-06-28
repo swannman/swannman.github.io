@@ -170,6 +170,17 @@
       </div>
 
       <div class="ctl">
+        <label>Motor cooling sleeve / casing ID</label>
+        <select id="sleeve">
+          <option value="0">None — open cistern (sleeve required)</option>
+          <option value="4" selected>4″ sleeve (snug)</option>
+          <option value="5">5″ sleeve / casing</option>
+          <option value="6">6″ casing</option>
+          <option value="8">8″ casing</option>
+        </select>
+      </div>
+
+      <div class="ctl">
         <label>Simulation speed <b id="vSpeed">10</b>×</label>
         <input id="speed" type="range" min="1" max="20" value="10" step="1">
       </div>
@@ -187,6 +198,7 @@
       </div>
       <canvas id="pumpcurve" width="580" height="320"></canvas>
       <div class="note" id="pumpnote"></div>
+      <div class="note" id="coolnote"></div>
     </div>
     <div class="card">
       <div class="chead">
@@ -238,8 +250,54 @@ const PUMP_BANDS = { minCont:20, porLo:20, bep:35, porHi:50, runout:50, axisMax:
 function pumpPsi(Q){ return 154.0 - 0.05302 * Q*Q; }
 // Pressure available at CSV inlet after lift + pipe friction
 function pumpDischarge(Q){ return pumpPsi(Q) - STATIC_LIFT_PSI - KF_PSI*Q*Q; }
-// Brake horsepower estimate for display
-function pumpBHP(Q){ return Math.max(0.5, 0.9 + 0.052*Q); }
+// ---- Motor loading & current --------------------------------------------------
+// Pump efficiency dome digitized from the F&W catalog curve (p.10): peak ~62% @ ~33 gpm.
+const PUMP_EFF = [[5,22],[10,40],[15,51],[20,57],[25,61],[30,62.5],[33,63],[35,62],
+                  [40,57],[45,49],[50,37],[52,30]];
+function pumpEff(Q){                           // fraction 0..1
+  const P=PUMP_EFF;
+  if(Q<=P[0][0]) return P[0][1]/100;
+  for(let i=1;i<P.length;i++){ if(Q<=P[i][0]){
+    const [q0,e0]=P[i-1],[q1,e1]=P[i]; return (e0+(e1-e0)*(Q-q0)/(q1-q0))/100; } }
+  return P[P.length-1][1]/100;
+}
+// Brake (shaft) horsepower from real hydraulics: WHP / efficiency, with a churn floor
+// near shutoff (pump still absorbs power at ~0 flow). WHP = Q*head_ft/3960.
+const PUMP_CHURN_HP = 1.3;
+function pumpBHP(Q){
+  const Hf = pumpPsi(Q)/PSI_PER_FT;            // head in feet
+  const whp = Q*Hf/3960;
+  return Math.max(PUMP_CHURN_HP, whp/Math.max(pumpEff(Q),0.05));
+}
+// Line current (A) of the Franklin 3HP/230V/1ph motor (AIM Table 13, model 224302).
+// Anchored EXACTLY to the two published load points: full load 3.0HP -> 14.0A / 2940W,
+// service-factor load 3.45HP -> 17.0A / 3350W.  Input-power linear in shaft power;
+// line amps = hypot(active, magnetizing), magnetizing rises into the SF (saturation).
+const MOTOR_V = 230, MOTOR_FL_HP = 3.0, MOTOR_FL_AMPS = 14.0, MOTOR_SF_AMPS = 17.0;
+function pumpAmps(bhp){
+  const Psh = bhp*745.7;                        // shaft watts
+  const Pin = 202 + 1.224*Psh;                  // input watts (fit thru FL & SF points)
+  const Iact = Pin/MOTOR_V;
+  const Imag = Psh<=2237 ? 5.7 : 5.7+(8.75-5.7)*(Psh-2237)/(2572-2237);
+  return Math.hypot(Iact, Imag);
+}
+// ---- Motor cooling -------------------------------------------------------------
+// Franklin AIM Table 6: a 4" motor rated 3 HP+ needs >= 0.25 ft/s of water velocity
+// past it (in water up to 86 F) for cooling. All pump flow passes the motor, so the
+// velocity in the annulus between the 3.75" motor and the casing/flow sleeve is:
+//   v(ft/s) = 0.4085 * Q(gpm) / (D_sleeve^2 - D_motor^2)   [D in inches]
+// An OPEN body of water (the cistern here) has no defined annulus — Franklin requires
+// a flow inducer sleeve in that case, so "no sleeve" is treated as inadequate cooling.
+const MOTOR_OD = 3.75;            // 4" Franklin motor nominal diameter (in)
+const COOL_VMIN = 0.25;           // ft/s minimum for 4" 3HP+ motor (Table 6)
+function coolingVel(Q){           // ft/s past the motor; 0 if no sleeve (open water)
+  if(params.sleeve<=0) return 0;
+  return 0.4085 * Q / (params.sleeve*params.sleeve - MOTOR_OD*MOTOR_OD);
+}
+function coolingMinFlow(){        // gpm needed to reach COOL_VMIN for the chosen sleeve
+  if(params.sleeve<=0) return Infinity;
+  return COOL_VMIN * (params.sleeve*params.sleeve - MOTOR_OD*MOTOR_OD) / 0.4085;
+}
 // Flow the pump delivers when its discharge equals a given downstream pressure
 function pumpFlowAtPressure(P){
   const C1 = 154.0 - STATIC_LIFT_PSI;          // 149.67
@@ -283,7 +341,8 @@ function naturalPressure(A){
 //=================================================================
 const params = {
   N:6, K:0.29, csv:50, cin:40, cout:60, Vtank:20, speed:10,
-  power:true, mode:'csv', elev:0   // mode: 'csv' | 'return' | 'neither';  elev ft, + above pump
+  power:true, mode:'csv', elev:0,  // mode: 'csv' | 'return' | 'neither';  elev ft, + above pump
+  sleeve:4                          // motor flow-sleeve / casing ID (in); 0 = none (open cistern)
 };
 let S = null;
 function precharge(){ return params.cin - 2; }
@@ -452,6 +511,13 @@ function step(dtMin){
   S.Qpump=Qpump; S.Qdem=dem.Q; S.Qnet=Qpump-dem.Q; S.Qreturn=Qreturn; S.regime=regime;
   S.Ppump=Ppump; S.Pcsvin=Pcsvin; S.Phead=dem.Phead;
   S.throttle=throttle; S.BHP=pumpOn?pumpBHP(Qpump):0; S.Pnat=Pnat;
+  // motor loading & current
+  S.amps = pumpOn ? pumpAmps(S.BHP) : 0;
+  S.pctFL = pumpOn ? 100*S.BHP/MOTOR_FL_HP : 0;
+  // motor cooling: flow velocity past the motor (all pump flow passes it)
+  S.coolVel = pumpOn ? coolingVel(Qpump) : 0;     // ft/s
+  S.coolMinQ = coolingMinFlow();                  // gpm needed for 0.25 ft/s
+  S.coolOK = !pumpOn || params.sleeve===0 ? (params.sleeve!==0) : S.coolVel >= COOL_VMIN;
   S.t += dtMin;
   S.hist.push({t:S.t, Pd:Pd, on:pumpOn});
   if(S.hist.length>1600) S.hist.shift();
@@ -533,8 +599,29 @@ function drawSchematic(){
   g.fillStyle='#9fb3cd'; g.font='10px Segoe UI'; g.textAlign='left';
   g.fillText('↑ 10 ft lift', X.pump+11, (pumpY+midY)/2+3);
 
+  // ---- motor cooling flow sleeve (annulus around the motor) ----
+  const undercooled = S.pumpOn && !S.coolOK;
+  if(params.sleeve>0){
+    const sw = clamp(8 + (params.sleeve-4)*7, 8, 34);   // half-width grows with sleeve ID
+    const syTop = pumpY-30, syBot = pumpY+34;
+    g.strokeStyle = undercooled ? '#ff5d6c' : '#3a6e8c'; g.lineWidth=2;
+    g.beginPath(); g.moveTo(X.pump-sw, syTop); g.lineTo(X.pump-sw, syBot);
+    g.moveTo(X.pump+sw, syTop); g.lineTo(X.pump+sw, syBot); g.stroke();
+    // upward cooling-flow chevrons in the annulus, speed ∝ velocity
+    if(S.pumpOn && S.coolVel>0.001){
+      const col = S.coolOK ? '#7fd4ff' : '#ffb04b';
+      g.strokeStyle=col; g.lineWidth=2;
+      for(const side of [-1,1]){ const ax=X.pump+side*(sw-4);
+        for(let c=0;c<3;c++){
+          const yy = syBot-8 - ((flowPhase*Math.min(S.coolVel,3)*14 + c*18) % 50);
+          g.beginPath(); g.moveTo(ax-3,yy+4); g.lineTo(ax,yy); g.lineTo(ax+3,yy+4); g.stroke();
+        }
+      }
+    }
+  }
+
   // ---- pump (submerged at the bottom of the cistern) ----
-  const pumpColor = S.pumpOn ? '#3ddc84' : '#5a6e8c';
+  const pumpColor = !S.pumpOn ? '#5a6e8c' : (undercooled ? '#ff5d6c' : '#3ddc84');
   g.fillStyle='#15273e'; circle(g, X.pump, pumpY, 26); g.fill();
   g.lineWidth=3; g.strokeStyle=pumpColor; circle(g, X.pump, pumpY, 26); g.stroke();
   g.save(); g.translate(X.pump,pumpY); g.rotate(flowPhase*(S.pumpOn?S.Qpump*0.04+0.3:0));
@@ -545,7 +632,13 @@ function drawSchematic(){
   g.fillStyle=S.pumpOn?'#3ddc84':'#ff5d6c'; g.font='bold 10px Segoe UI';
   g.fillText(S.pumpOn?'● PUMP':'○ PUMP', X.pump, pumpY+40);
   g.fillStyle='#9fb3cd'; g.font='10px Segoe UI';
-  g.fillText(S.BHP.toFixed(1)+' HP', X.pump, pumpY+52);
+  g.fillText(S.BHP.toFixed(1)+' HP · '+S.amps.toFixed(1)+' A', X.pump, pumpY+52);
+  // cooling status line
+  if(S.pumpOn){
+    if(params.sleeve<=0){ g.fillStyle='#ff5d6c'; g.fillText('⚠ no sleeve (open)', X.pump, pumpY+64); }
+    else { g.fillStyle = S.coolOK ? '#7ee0a4' : '#ff5d6c';
+      g.fillText('cool '+S.coolVel.toFixed(2)+' ft/s'+(S.coolOK?'':' ⚠'), X.pump, pumpY+64); }
+  }
   // gauges right at the pump (above the cistern)
   drawGauge(g, X.cist-34, cTop-56, 28, S.Ppump, 180, 'psi', 'pump P', '#ffc24b');
   drawGauge(g, X.cist+34, cTop-56, 28, S.Qpump, 50, 'gpm', 'pump Q', '#39b7ff');
@@ -858,6 +951,7 @@ bind('csv', e=>{ params.csv=+e.value; document.getElementById('vCsv').textConten
 bind('cin', e=>{ params.cin=+e.value; enforceOrder(); });
 bind('cout', e=>{ params.cout=+e.value; enforceOrder(); });
 bind('tank', e=>{ params.Vtank=+e.value; });
+bind('sleeve', e=>{ params.sleeve=+e.value; });
 bind('speed', e=>{ params.speed=+e.value; document.getElementById('vSpeed').textContent=e.value; });
 bind('elev', e=>{ params.elev=+e.value;
   document.getElementById('vElev').textContent=(e.value>0?'+':'')+e.value+' ft'; });
@@ -908,6 +1002,10 @@ function updateText(){
   const cyc = S.cyclesPerHr;
   const cycCol = cyc>30?'var(--red)':cyc>10?'var(--amber)':'var(--green)';
   const sb=document.getElementById('statebar');
+  const ampCol = S.pctFL>115?'var(--red)':S.pctFL>100?'var(--amber)':'var(--green)';
+  const coolCol = !S.pumpOn?'var(--muted)':(S.coolOK?'var(--green)':'var(--red)');
+  const coolTxt = !S.pumpOn ? '—'
+    : params.sleeve<=0 ? 'no sleeve' : S.coolVel.toFixed(2)+' ft/s';
   sb.innerHTML =
     `<span>state <b>${S.regime}</b></span>`+
     `<span>pump P <b>${S.Ppump.toFixed(0)}</b> psi</span>`+
@@ -918,6 +1016,8 @@ function updateText(){
     `<span>head P <b>${S.Phead.toFixed(1)}</b> psi</span>`+
     `<span>zone Q <b>${S.Qdem.toFixed(1)}</b> gpm</span>`+
     `<span>tank <b>${(params.Vtank-S.Vair).toFixed(1)}</b> gal</span>`+
+    `<span>motor <b style="color:${ampCol}">${S.amps.toFixed(1)}</b> A · ${S.pctFL.toFixed(0)}% FL</span>`+
+    `<span>cooling <b style="color:${coolCol}">${coolTxt}</b></span>`+
     `<span>cycles/hr <b style="color:${cycCol}">${cyc<0.5?'0':cyc.toFixed(0)}</b></span>`;
   let msg='';
   const A=params.N*params.K;
@@ -961,8 +1061,22 @@ function updateText(){
       + (params.mode==='csv' ? (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.')
          : params.mode==='return' ? 'Return line: pump runs at the high-flow end, recirculating the excess.'
          : 'No valve: pump sits at the high-flow / low-pressure end and cycles.');
+    // motor loading
+    const flCol = S.pctFL>115?'var(--red)':S.pctFL>100?'var(--amber)':'var(--green)';
+    pn += ` <span class="badge">Motor drawing <b style="color:${flCol}">${S.amps.toFixed(1)} A</b> (${S.pctFL.toFixed(0)}% of full load; Franklin 3HP 230V·1φ: 14.0 A FL / 17.0 A SF).</span>`;
   }
   document.getElementById('pumpnote').innerHTML=pn;
+
+  // motor-cooling note (CSV valve panel already covers the valve; this is on the pump card)
+  let cool;
+  if(!S.pumpOn) cool='';
+  else if(params.sleeve<=0)
+    cool=`<span style="color:var(--red)">⚠ No flow sleeve.</span> The motor sits in an open cistern — Franklin requires a flow inducer sleeve in open water so the pumped flow is forced past the motor for cooling. Add a sleeve to ensure ≥ 0.25 ft/s.`;
+  else if(S.coolOK)
+    cool=`<span style="color:var(--green)">Cooling OK:</span> ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ sleeve (need ≥ 0.25 ft/s ⇒ ≥ ${S.coolMinQ.toFixed(0)} gpm). Franklin AIM Table 6, 4″ motor ≥ 3 HP.`;
+  else
+    cool=`<span style="color:var(--red)">⚠ Insufficient cooling:</span> only ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ casing — below the 0.25 ft/s minimum (need ≥ ${S.coolMinQ.toFixed(0)} gpm at this casing size). At ${S.Qpump.toFixed(1)} gpm the motor can overheat; use a snug flow sleeve so low-flow (CSV-throttled) running still cools it.`;
+  document.getElementById('coolnote').innerHTML=cool;
 
   // valve note
   const drop = Math.max(0, S.Pcsvin - params.csv);
@@ -1024,6 +1138,19 @@ function selfTest(){
   // solveDemand self-consistency even under heavy over-demand: Q == A·√(Phead)
   params.elev=0; const sd=solveDemand(11.6, 18);
   approx(sd.Q, 11.6*Math.sqrt(sd.Phead), 0.01, 'solveDemand consistent under over-demand');
+  // motor current anchored to Franklin Table 13 (model 224302): FL 14.0A, SF 17.0A
+  approx(pumpAmps(3.0),  14.0, 0.2, 'motor amps @ full load (3.0 HP) ≈ 14.0 A');
+  approx(pumpAmps(3.45), 17.0, 0.3, 'motor amps @ service factor (3.45 HP) ≈ 17.0 A');
+  // BHP from real hydraulics: ~3.0 HP (full load) at BEP, and DROPS toward runout
+  approx(pumpBHP(35), 3.0, 0.3, 'shaft BHP @ BEP (35 gpm) ≈ 3.0 HP = motor full load');
+  if(pumpBHP(50) < pumpBHP(35)) console.log('✓ BHP drops toward runout (head collapses)  ('+pumpBHP(50).toFixed(2)+' < '+pumpBHP(35).toFixed(2)+')');
+  else console.log('✗ BHP should drop toward runout');
+  // cooling: min flow for 0.25 ft/s reproduces Franklin Table 6 (4" motor)
+  const sv=params.sleeve;
+  params.sleeve=6; approx(coolingMinFlow(), 13.4, 1.0, '6″ casing min cooling flow ≈ 13 gpm (Table 6)');
+  params.sleeve=4; approx(coolingMinFlow(),  1.2, 0.3, '4″ casing min cooling flow ≈ 1.2 gpm (Table 6)');
+  approx(coolingVel(20), 4.21, 0.2, '4″ sleeve @ 20 gpm ≈ 4.2 ft/s (well cooled)');
+  params.sleeve=sv;
 }
 
 //=================================================================
