@@ -7,12 +7,18 @@
 <!--
   Cycle-Stop Valve Pump System Simulator — single-file, no dependencies.
   Calibrated to real products. Sources (researched 2026-06-26):
-    PUMP  Flint & Walling 4F35S30 (3HP/35GPM, 10-stage). Curve digitized directly
-          from the published F&W 4" submersible catalog capacity table (p.10, 4F35
-          family): max pressure 355ft/154psi at shutoff; recommended range 20-50 GPM.
-          Quadratic H(Q)=154-0.05302*Q^2 psi reproduces the published shutoff exactly
-          and matches the 20/40/60-psi discharge columns to <3 psi rms (the 0-psi
-          column is an outlier and is excluded). flintandwalling.com FW1674 catalog.
+    PUMPS Two selectable, authentic 3HP/35GPM/4" pumps, each H(Q)=H0-k*Q^2 psi fitted
+          to the maker's published depth-to-capacity table (<3 psi rms over 30-86 pts):
+            FW  Flint & Walling 4F35S30 — 10-stage; shutoff 355ft/154psi; H=154-0.05302Q^2;
+                recommended 20-50 GPM, BEP 35. F&W FW1674 4" catalog p.10 (0-psi column,
+                an outlier, excluded). 3HP+ F&W ends ship with a Franklin motor.
+            FE  Franklin Electric 35JS3S4 — 14-stage; shutoff 396ft/171.7psi; H=171.7-0.05811Q^2;
+                operating 15-45 GPM, best-eff 20-40, BEP ~32. Franklin J-Class 4" Hi-Cap
+                catalog (35 gpm performance). Stronger head => loads the motor near its SF.
+    MOTOR Franklin Electric 3HP/230V/1ph 3-wire (224302) — SHARED by both pumps.
+          AIM Table 13: full load 14.0A/2940W, service factor (1.15) 17.0A/3350W.
+    COOL  Franklin AIM Table 6: 4" motor >=3HP needs >=0.25 ft/s past the motor; flow
+          sleeve "always required in an open body of water". franklinwater.com/resources/franklin-aim
     CSV   Cycle Stop Valves CSV3A + CSV1A pilot. Min continuous flow 5 GPM.
           Holds constant downstream pressure; pilot 15-150psi. cyclestopvalves.com
     TANK  Amtrol WellXTrol. Boyle's law drawdown; precharge = cut-in - 2.
@@ -88,7 +94,7 @@
 <body>
 <header>
   <h1>💧 Cycle-Stop Valve Pump System Simulator</h1>
-  <p>Flint &amp; Walling 3 HP / 35 GPM pump · CSV3A + CSV1A pilot · Amtrol WellXTrol tank · 40/60 switch · live transient model</p>
+  <p>Selectable 3 HP / 35 GPM pump (Flint &amp; Walling 4F35S30 or Franklin Electric 35JS3S4) · CSV3A + CSV1A pilot · Amtrol WellXTrol tank · 40/60 switch · live transient model</p>
 </header>
 
 <div class="wrap">
@@ -114,6 +120,13 @@
         <div class="switch on" id="pumpPower">
           <div class="dot"></div><div>Pump power (master)</div>
         </div>
+      </div>
+      <div class="ctl">
+        <label>Pump (3 HP · 35 GPM · 4″)</label>
+        <select id="pump">
+          <option value="fw" selected>Flint &amp; Walling 4F35S30 · 10-stage</option>
+          <option value="fe">Franklin Electric 35JS3S4 · 14-stage</option>
+        </select>
       </div>
       <div class="ctl">
         <label>System type</label>
@@ -194,7 +207,7 @@
     <div class="card">
       <div class="chead">
         <h3>Pump curve &amp; safe operating range</h3>
-        <span class="badge"><a href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf" target="_blank" rel="noopener">F&amp;W 4F35S30 curve ↗</a> · ● live point</span>
+        <span class="badge"><a id="pumpCurveLink" href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf" target="_blank" rel="noopener">F&amp;W 4F35S30 curve ↗</a> · ● live point</span>
       </div>
       <canvas id="pumpcurve" width="580" height="320"></canvas>
       <div class="note" id="pumpnote"></div>
@@ -212,9 +225,11 @@
 
   <div class="srclinks">
     <b>Manufacturer specs &amp; curves:</b>
-    Pump —
+    Pumps —
     <a href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf" target="_blank" rel="noopener">Flint &amp; Walling 4&quot; submersible catalog (4F35S30 curves)</a>,
-    <a href="https://deanbennettsupply.com/products/47102/Flint-Walling-F-W-4F35S30-3-HP-35-GPM-SUBMERSIBLE-PUMP-END" target="_blank" rel="noopener">4F35S30 product page</a>.
+    <a href="https://franklinwater.com/" target="_blank" rel="noopener">Franklin Electric 4&quot; High-Capacity (35JS3S4, J-Class curves)</a>.
+    Motor &amp; cooling —
+    <a href="https://www.franklinwater.com/resources/franklin-aim" target="_blank" rel="noopener">Franklin AIM Manual (motor specs Table 13; cooling flow Table 6 — flow sleeve required in open water)</a>.
     Cycle Stop Valve —
     <a href="https://cyclestopvalves.com/pages/csv3a-csv3b" target="_blank" rel="noopener">CSV3A/3B general info</a>,
     <a href="https://cyclestopvalves.com/pages/basic-operation-of-a-cycle-stop-valve" target="_blank" rel="noopener">basic operation</a>,
@@ -241,21 +256,37 @@ const CSV_MIN_DROP = 7.0;               // CSV3A min friction loss to regulate (
 const CSV_DIFF_MAX = 125;               // single-valve recommended max differential (psi)
 const PUMP_RUNOUT = 50;                 // approx max flow for display clamps
 
-// Pump operating-range bands (GPM) — Flint & Walling published recommended range
-// 20-50 GPM (catalog p.10); BEP=35 (4F35 series nominal). Outside 20-50 = not recommended.
-const PUMP_BANDS = { minCont:20, porLo:20, bep:35, porHi:50, runout:50, axisMax:52, pMax:160 };
+// ---- Pump library — two real, authentic pumps, both 3 HP / 35 GPM / 4" ----------
+// Each H-Q curve P(Q)=H0-k*Q^2 (psi) is fitted to the manufacturer's published
+// depth-to-capacity table; eff is the efficiency dome digitized from the catalog
+// curve; bands are the published operating / best-efficiency ranges (GPM).
+//   FW  Flint & Walling 4F35S30  — 10-stage, shutoff 355 ft/154 psi (catalog p.10).
+//   FE  Franklin Electric 35JS3S4 — 14-stage, shutoff 396 ft/171.7 psi (J-Class cat.).
+// Both drive the SAME Franklin 3 HP/230 V/1-ph motor (224302), so the motor current
+// and cooling models below are shared; only the pump end differs.
+const PUMPS = {
+  fw: { name:'Flint & Walling 4F35S30', short:'F&W 4F35S30', stages:10,
+        H0:154.0, k:0.05302, churn:1.3,
+        url:'https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf',
+        eff:[[5,22],[10,40],[15,51],[20,57],[25,61],[30,62.5],[33,63],[35,62],[40,57],[45,49],[50,37],[52,30]],
+        bands:{ minCont:20, porLo:20, bep:35, porHi:50, runout:50, axisMax:52, pMax:160 } },
+  fe: { name:'Franklin Electric 35JS3S4', short:'FE 35JS3S4', stages:14,
+        H0:171.7, k:0.05811, churn:1.4,
+        url:'https://franklinwater.com/',
+        eff:[[5,20],[10,36],[15,46],[20,53],[25,58],[30,60.5],[32,61],[35,60],[40,55],[45,46],[50,36],[55,24]],
+        bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:180 } }
+};
+function pump(){ return PUMPS[params.pump]; }
+// live operating-range bands of the selected pump (reassigned on pump change)
+let PUMP_BANDS = PUMPS.fw.bands;
 
-// Pump head-flow curve (Flint & Walling 4F35S30): P(Q) psi, Q gpm.
-// Digitized from the published catalog table — shutoff 154 psi (355 ft), see header.
-function pumpPsi(Q){ return 154.0 - 0.05302 * Q*Q; }
+// Pump head-flow curve of the selected pump: P(Q) psi, Q gpm.
+function pumpPsi(Q){ const p=pump(); return p.H0 - p.k * Q*Q; }
 // Pressure available at CSV inlet after lift + pipe friction
 function pumpDischarge(Q){ return pumpPsi(Q) - STATIC_LIFT_PSI - KF_PSI*Q*Q; }
 // ---- Motor loading & current --------------------------------------------------
-// Pump efficiency dome digitized from the F&W catalog curve (p.10): peak ~62% @ ~33 gpm.
-const PUMP_EFF = [[5,22],[10,40],[15,51],[20,57],[25,61],[30,62.5],[33,63],[35,62],
-                  [40,57],[45,49],[50,37],[52,30]];
-function pumpEff(Q){                           // fraction 0..1
-  const P=PUMP_EFF;
+function pumpEff(Q){                           // fraction 0..1 (selected pump's dome)
+  const P=pump().eff;
   if(Q<=P[0][0]) return P[0][1]/100;
   for(let i=1;i<P.length;i++){ if(Q<=P[i][0]){
     const [q0,e0]=P[i-1],[q1,e1]=P[i]; return (e0+(e1-e0)*(Q-q0)/(q1-q0))/100; } }
@@ -263,11 +294,10 @@ function pumpEff(Q){                           // fraction 0..1
 }
 // Brake (shaft) horsepower from real hydraulics: WHP / efficiency, with a churn floor
 // near shutoff (pump still absorbs power at ~0 flow). WHP = Q*head_ft/3960.
-const PUMP_CHURN_HP = 1.3;
 function pumpBHP(Q){
   const Hf = pumpPsi(Q)/PSI_PER_FT;            // head in feet
   const whp = Q*Hf/3960;
-  return Math.max(PUMP_CHURN_HP, whp/Math.max(pumpEff(Q),0.05));
+  return Math.max(pump().churn, whp/Math.max(pumpEff(Q),0.05));
 }
 // Line current (A) of the Franklin 3HP/230V/1ph motor (AIM Table 13, model 224302).
 // Anchored EXACTLY to the two published load points: full load 3.0HP -> 14.0A / 2940W,
@@ -281,15 +311,20 @@ function pumpAmps(bhp){
   const Imag = Psh<=2237 ? 5.7 : 5.7+(8.75-5.7)*(Psh-2237)/(2572-2237);
   return Math.hypot(Iact, Imag);
 }
-// ---- Motor cooling -------------------------------------------------------------
-// Franklin AIM Table 6: a 4" motor rated 3 HP+ needs >= 0.25 ft/s of water velocity
-// past it (in water up to 86 F) for cooling. All pump flow passes the motor, so the
-// velocity in the annulus between the 3.75" motor and the casing/flow sleeve is:
+// ---- Motor cooling (Franklin AIM Manual, "Water Temperature and Flow") ---------
+// BOTH pumps drive the same Franklin 4" 3 HP motor (224302) — F&W's 3 HP+ ends ship
+// with a Franklin motor — so the cooling requirement is identical and motor-defined,
+// not pump-brand-defined. Franklin AIM Table 6 requires >= 0.25 ft/s of water velocity
+// past a 4" motor rated 3 HP and up (water up to 86 F). All pump flow passes the motor;
+// the velocity in the annulus between the 3.75" motor and the casing/flow sleeve is:
 //   v(ft/s) = 0.4085 * Q(gpm) / (D_sleeve^2 - D_motor^2)   [D in inches]
-// An OPEN body of water (the cistern here) has no defined annulus — Franklin requires
-// a flow inducer sleeve in that case, so "no sleeve" is treated as inadequate cooling.
-const MOTOR_OD = 3.75;            // 4" Franklin motor nominal diameter (in)
-const COOL_VMIN = 0.25;           // ft/s minimum for 4" 3HP+ motor (Table 6)
+// This reproduces Table 6's published minimums (4"=>1.2, 5"=>7, 6"=>13, 8"=>30 gpm).
+// Franklin also states a flow inducer sleeve "is always required in an open body of
+// water" — so the cistern's "no sleeve" case is, per Franklin, inadequate cooling.
+//   Source: Franklin AIM Manual, "Water Temperature and Flow" / Table 6 & Fig. 1.
+const COOL_DOC = 'https://www.franklinwater.com/resources/franklin-aim';
+const MOTOR_OD = 3.75;            // 4" Franklin motor nominal diameter (in), per Table 6
+const COOL_VMIN = 0.25;           // ft/s minimum for a 4" motor rated 3 HP+ (Table 6)
 function coolingVel(Q){           // ft/s past the motor; 0 if no sleeve (open water)
   if(params.sleeve<=0) return 0;
   return 0.4085 * Q / (params.sleeve*params.sleeve - MOTOR_OD*MOTOR_OD);
@@ -300,8 +335,9 @@ function coolingMinFlow(){        // gpm needed to reach COOL_VMIN for the chose
 }
 // Flow the pump delivers when its discharge equals a given downstream pressure
 function pumpFlowAtPressure(P){
-  const C1 = 154.0 - STATIC_LIFT_PSI;          // 149.67
-  const C2 = 0.05302 + KF_PSI;                 // 0.06256
+  const p = pump();
+  const C1 = p.H0 - STATIC_LIFT_PSI;
+  const C2 = p.k + KF_PSI;
   const v = (C1 - P)/C2;
   return v>0 ? Math.sqrt(v) : 0;
 }
@@ -342,7 +378,8 @@ function naturalPressure(A){
 const params = {
   N:6, K:0.29, csv:50, cin:40, cout:60, Vtank:20, speed:10,
   power:true, mode:'csv', elev:0,  // mode: 'csv' | 'return' | 'neither';  elev ft, + above pump
-  sleeve:4                          // motor flow-sleeve / casing ID (in); 0 = none (open cistern)
+  sleeve:4,                         // motor flow-sleeve / casing ID (in); 0 = none (open cistern)
+  pump:'fw'                         // 'fw' = Flint & Walling 4F35S30 | 'fe' = Franklin 35JS3S4
 };
 let S = null;
 function precharge(){ return params.cin - 2; }
@@ -641,7 +678,7 @@ function drawSchematic(){
   }
   // gauges right at the pump (above the cistern)
   drawGauge(g, X.cist-34, cTop-56, 28, S.Ppump, 180, 'psi', 'pump P', '#ffc24b');
-  drawGauge(g, X.cist+34, cTop-56, 28, S.Qpump, 50, 'gpm', 'pump Q', '#39b7ff');
+  drawGauge(g, X.cist+34, cTop-56, 28, S.Qpump, PUMP_BANDS.axisMax, 'gpm', 'pump Q', '#39b7ff');
 
   // ---- return line (horizontal recirculation back to the cistern, same elevation) ----
   if(params.mode==='return'){
@@ -825,12 +862,12 @@ function drawPumpCurve(){
   g.clearRect(0,0,W,H);
   const X=q=>L+q/Qm*(W-L-R), Y=p=>H-B-p/Pm*(H-T-B);
   const band=(q0,q1,c)=>{ g.fillStyle=c; g.fillRect(X(q0),T,X(Math.min(q1,Qm))-X(q0),H-T-B); };
-  // colour-coded flow bands — Flint & Walling published recommended range 20-50 GPM
-  band(0,B_.minCont,        COL.red+'0.14)');     // below 20 GPM — not recommended
-  band(B_.minCont,B_.porLo, COL.amber+'0.12)');   // (nil: minCont==porLo)
-  band(B_.porLo,B_.porHi,   COL.green+'0.15)');   // recommended operating range 20-50
-  band(B_.porHi,B_.runout,  COL.amber+'0.12)');   // (nil: porHi==runout)
-  band(B_.runout,Qm,        COL.red+'0.14)');     // past 50 GPM — runout
+  // colour-coded flow bands — manufacturer's published operating / best-efficiency range
+  band(0,B_.minCont,        COL.red+'0.14)');     // below operating range
+  band(B_.minCont,B_.porLo, COL.amber+'0.12)');   // operating, below best-efficiency
+  band(B_.porLo,B_.porHi,   COL.green+'0.15)');   // best-efficiency range
+  band(B_.porHi,B_.runout,  COL.amber+'0.12)');   // operating, above best-efficiency
+  band(B_.runout,Qm,        COL.red+'0.14)');     // past runout
   // grid + axis labels
   g.strokeStyle='#22344f'; g.lineWidth=1; g.font='10px Segoe UI';
   for(let p=0;p<=Pm;p+=30){ g.beginPath(); g.moveTo(L,Y(p)); g.lineTo(W-R,Y(p)); g.stroke();
@@ -839,10 +876,10 @@ function drawPumpCurve(){
   g.fillStyle='#cfe0f7'; g.textAlign='center'; g.font='11px Segoe UI';
   g.fillText('Flow (GPM)', (L+W-R)/2, H-4);
   g.save(); g.translate(13,(T+H-B)/2); g.rotate(-Math.PI/2); g.fillText('Pump pressure (psi)',0,0); g.restore();
-  // zone labels
+  // zone labels (from the selected pump's published ranges)
   g.font='9px Segoe UI'; g.textAlign='center';
-  g.fillStyle='#ff8b96'; g.fillText('below 20', X(B_.minCont/2), T+11);
-  g.fillStyle='#7ee0a4'; g.fillText('recommended 20–50', X((B_.porLo+B_.porHi)/2), T+11);
+  g.fillStyle='#ff8b96'; g.fillText('< '+B_.minCont, X(B_.minCont/2), T+11);
+  g.fillStyle='#7ee0a4'; g.fillText('best eff. '+B_.porLo+'–'+B_.porHi, X((B_.porLo+B_.porHi)/2), T+11);
   g.fillStyle='#ff8b96'; g.fillText('runout', X((B_.runout+Qm)/2), T+11);
   // pump curve
   g.strokeStyle='#7c5cff'; g.lineWidth=2.5; g.beginPath();
@@ -850,7 +887,7 @@ function drawPumpCurve(){
   // BEP marker
   const bx=X(B_.bep), by=Y(pumpPsi(B_.bep));
   g.fillStyle='#eaf2ff'; circle(g,bx,by,3); g.fill();
-  g.fillStyle='#cfe0f7'; g.font='9px Segoe UI'; g.textAlign='center'; g.fillText('BEP 35', bx, by-7);
+  g.fillStyle='#cfe0f7'; g.font='9px Segoe UI'; g.textAlign='center'; g.fillText('BEP '+B_.bep, bx, by-7);
   // live operating point
   if(S.pumpOn){
     const q=clamp(S.Qpump,0,Qm), p=pumpPsi(q), ox=X(q), oy=Y(p);
@@ -951,6 +988,8 @@ bind('csv', e=>{ params.csv=+e.value; document.getElementById('vCsv').textConten
 bind('cin', e=>{ params.cin=+e.value; enforceOrder(); });
 bind('cout', e=>{ params.cout=+e.value; enforceOrder(); });
 bind('tank', e=>{ params.Vtank=+e.value; });
+bind('pump', e=>{ params.pump=e.value; PUMP_BANDS=PUMPS[e.value].bands; S.starts=[]; S.cyclesPerHr=0;
+  const a=document.getElementById('pumpCurveLink'); a.textContent=PUMPS[e.value].short+' curve ↗'; a.href=PUMPS[e.value].url; });
 bind('sleeve', e=>{ params.sleeve=+e.value; });
 bind('speed', e=>{ params.speed=+e.value; document.getElementById('vSpeed').textContent=e.value; });
 bind('elev', e=>{ params.elev=+e.value;
@@ -1050,14 +1089,15 @@ function updateText(){
   document.getElementById('explain').innerHTML=msg;
 
   // pump-curve note
-  const B_=PUMP_BANDS, q=S.Qpump;
+  const B_=PUMP_BANDS, q=S.Qpump, pmp=pump();
   let pn;
-  if(!S.pumpOn) pn='Pump off — sitting at shutoff head (0 gpm). No flow work.';
+  if(!S.pumpOn) pn=`Pump off — ${pmp.short} sitting at shutoff head (0 gpm). No flow work.`;
   else {
-    const zone = q<B_.minCont ? '<span class="warn">⚠ below F&W\'s 20 GPM recommended minimum</span>'
-      : q>B_.runout ? '<span style="color:var(--red)">⚠ above the 50 GPM recommended maximum — past runout</span>'
-      : '<span style="color:var(--green)">within F&W\'s recommended 20–50 GPM range</span>';
-    pn=`Operating at <b>${q.toFixed(1)} gpm / ${S.Ppump.toFixed(0)} psi</b> — ${zone}. `
+    const zone = q<B_.minCont ? `<span class="warn">⚠ below the ${B_.minCont} GPM operating-range minimum</span>`
+      : q>B_.runout ? `<span style="color:var(--red)">⚠ above the ${B_.runout} GPM maximum — past runout</span>`
+      : (q>=B_.porLo&&q<=B_.porHi) ? `<span style="color:var(--green)">in the best-efficiency range (${B_.porLo}–${B_.porHi} GPM)</span>`
+      : `<span class="warn">in the operating range (${B_.minCont}–${B_.runout} GPM), outside best efficiency</span>`;
+    pn=`<b>${pmp.short}</b> (${pmp.stages}-stage) operating at <b>${q.toFixed(1)} gpm / ${S.Ppump.toFixed(0)} psi</b> — ${zone}. `
       + (params.mode==='csv' ? (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.')
          : params.mode==='return' ? 'Return line: pump runs at the high-flow end, recirculating the excess.'
          : 'No valve: pump sits at the high-flow / low-pressure end and cycles.');
@@ -1067,15 +1107,16 @@ function updateText(){
   }
   document.getElementById('pumpnote').innerHTML=pn;
 
-  // motor-cooling note (CSV valve panel already covers the valve; this is on the pump card)
+  // motor-cooling note — same Franklin 4" motor for both pumps, so the requirement is shared.
+  const aim=`<a href="${COOL_DOC}" target="_blank" rel="noopener">Franklin AIM Table 6</a>`;
   let cool;
   if(!S.pumpOn) cool='';
   else if(params.sleeve<=0)
-    cool=`<span style="color:var(--red)">⚠ No flow sleeve.</span> The motor sits in an open cistern — Franklin requires a flow inducer sleeve in open water so the pumped flow is forced past the motor for cooling. Add a sleeve to ensure ≥ 0.25 ft/s.`;
+    cool=`<span style="color:var(--red)">⚠ No flow sleeve.</span> The Franklin 4″ motor sits in an open cistern — ${aim} states a flow inducer sleeve <b>“is always required in an open body of water”</b> so pumped flow is forced past the motor. Add a sleeve to ensure ≥ 0.25 ft/s.`;
   else if(S.coolOK)
-    cool=`<span style="color:var(--green)">Cooling OK:</span> ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ sleeve (need ≥ 0.25 ft/s ⇒ ≥ ${S.coolMinQ.toFixed(0)} gpm). Franklin AIM Table 6, 4″ motor ≥ 3 HP.`;
+    cool=`<span style="color:var(--green)">Cooling OK:</span> ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ sleeve (${aim} needs ≥ 0.25 ft/s ⇒ ≥ ${S.coolMinQ.toFixed(0)} gpm for a 4″ motor ≥ 3 HP). Same motor on both pumps.`;
   else
-    cool=`<span style="color:var(--red)">⚠ Insufficient cooling:</span> only ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ casing — below the 0.25 ft/s minimum (need ≥ ${S.coolMinQ.toFixed(0)} gpm at this casing size). At ${S.Qpump.toFixed(1)} gpm the motor can overheat; use a snug flow sleeve so low-flow (CSV-throttled) running still cools it.`;
+    cool=`<span style="color:var(--red)">⚠ Insufficient cooling:</span> only ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ casing — below the 0.25 ft/s minimum (${aim} requires ≥ ${S.coolMinQ.toFixed(0)} gpm at this casing size). At ${S.Qpump.toFixed(1)} gpm the motor can overheat; use a snug flow sleeve so low-flow (CSV-throttled) running still cools it.`;
   document.getElementById('coolnote').innerHTML=cool;
 
   // valve note
@@ -1148,9 +1189,21 @@ function selfTest(){
   // cooling: min flow for 0.25 ft/s reproduces Franklin Table 6 (4" motor)
   const sv=params.sleeve;
   params.sleeve=6; approx(coolingMinFlow(), 13.4, 1.0, '6″ casing min cooling flow ≈ 13 gpm (Table 6)');
+  params.sleeve=5; approx(coolingMinFlow(),  7.0, 0.5, '5″ casing min cooling flow ≈ 7 gpm (Table 6)');
+  params.sleeve=8; approx(coolingMinFlow(), 30.0, 1.0, '8″ casing min cooling flow ≈ 30 gpm (Table 6)');
   params.sleeve=4; approx(coolingMinFlow(),  1.2, 0.3, '4″ casing min cooling flow ≈ 1.2 gpm (Table 6)');
   approx(coolingVel(20), 4.21, 0.2, '4″ sleeve @ 20 gpm ≈ 4.2 ft/s (well cooled)');
   params.sleeve=sv;
+  // ---- Franklin Electric 35JS3S4 pump (14-stage) ----
+  const pv=params.pump, fwBep=pumpBHP(35);     // F&W shaft load at its BEP
+  params.pump='fe';
+  approx(pumpPsi(0), 171.7, 0.5, 'FE shutoff ≈ 171.7 psi (396 ft, 14-stage)');
+  approx(pumpPsi(18)/PSI_PER_FT, 350, 8, 'FE 18gpm ≈ 350 ft (J-Class table)');
+  approx(pumpPsi(32)/PSI_PER_FT, 259, 10, 'FE 32gpm ≈ 259 ft (table)');
+  approx(pumpBHP(32), 3.43, 0.3, 'FE shaft BHP @ BEP ≈ 3.4 HP (rides near service factor)');
+  if(pumpBHP(32) > fwBep) console.log('✓ FE (14-stage) loads the motor harder than F&W ('+pumpBHP(32).toFixed(2)+' > '+fwBep.toFixed(2)+' HP)');
+  else console.log('✗ FE should load the motor harder than F&W');
+  params.pump=pv;
 }
 
 //=================================================================
