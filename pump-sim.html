@@ -49,7 +49,8 @@
   canvas{display:block; width:100%; border-radius:12px}
   #schematic{background:linear-gradient(180deg,#0d1828,#0b1422)}
   #chart{background:#0b1422}
-  .grid{display:grid; grid-template-columns:1fr 320px; gap:14px}
+  .grid{display:grid; grid-template-columns:1fr 320px; gap:14px; align-items:start}
+  .leftcol{display:flex; flex-direction:column}
   .grid2{display:grid; grid-template-columns:1fr 1fr; gap:14px}
   @media(max-width:900px){.grid,.grid2{grid-template-columns:1fr}}
   .chead{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px}
@@ -103,6 +104,7 @@
   </div>
 
   <div class="grid">
+    <div class="leftcol">
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:baseline">
         <h3 style="margin:0;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-size:13px">Downstream pressure &amp; pump cycling</h3>
@@ -111,6 +113,26 @@
       <canvas id="chart" width="780" height="220" style="margin-top:10px"></canvas>
       <div class="statebar" id="statebar"></div>
       <div class="note" id="explain"></div>
+    </div>
+
+      <div class="card">
+        <div class="chead">
+          <h3>Pump curve &amp; safe operating range</h3>
+          <span class="badge"><a id="pumpCurveLink" href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf" target="_blank" rel="noopener">F&amp;W 4F35S30 curve ↗</a> · ● live point</span>
+        </div>
+        <canvas id="pumpcurve" width="780" height="320"></canvas>
+        <div class="note" id="pumpnote"></div>
+        <div class="note" id="coolnote"></div>
+      </div>
+
+      <div class="card">
+        <div class="chead">
+          <h3>Cycle-stop valve characteristic</h3>
+          <span class="badge"><a href="https://cyclestopvalves.com/pages/csv3a-csv3b" target="_blank" rel="noopener">CSV3A specs ↗</a> · inlet vs outlet</span>
+        </div>
+        <canvas id="csvcurve" width="780" height="320"></canvas>
+        <div class="note" id="csvnote"></div>
+      </div>
     </div>
 
     <div class="card controls">
@@ -200,26 +222,6 @@
 
       <button class="reset" id="reset">Reset simulation</button>
       <div class="note" id="ordering"></div>
-    </div>
-  </div>
-
-  <div class="grid2">
-    <div class="card">
-      <div class="chead">
-        <h3>Pump curve &amp; safe operating range</h3>
-        <span class="badge"><a id="pumpCurveLink" href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf" target="_blank" rel="noopener">F&amp;W 4F35S30 curve ↗</a> · ● live point</span>
-      </div>
-      <canvas id="pumpcurve" width="580" height="320"></canvas>
-      <div class="note" id="pumpnote"></div>
-      <div class="note" id="coolnote"></div>
-    </div>
-    <div class="card">
-      <div class="chead">
-        <h3>Cycle-stop valve characteristic</h3>
-        <span class="badge"><a href="https://cyclestopvalves.com/pages/csv3a-csv3b" target="_blank" rel="noopener">CSV3A specs ↗</a> · inlet vs outlet</span>
-      </div>
-      <canvas id="csvcurve" width="580" height="320"></canvas>
-      <div class="note" id="csvnote"></div>
     </div>
   </div>
 
