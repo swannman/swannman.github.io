@@ -19,8 +19,9 @@
           AIM Table 13: full load 14.0A/2940W, service factor (1.15) 17.0A/3350W.
     COOL  Franklin AIM Table 6: 4" motor >=3HP needs >=0.25 ft/s past the motor; flow
           sleeve "always required in an open body of water". franklinwater.com/resources/franklin-aim
-    CSV   Cycle Stop Valves CSV3A + CSV1A pilot. Min continuous flow 5 GPM.
-          Holds constant downstream pressure; pilot 15-150psi. cyclestopvalves.com
+    CSV   Cycle Stop Valves CSV2W (1-1/4" bronze, 5-50 GPM). Min control/tank-fill
+          5 GPM; adjust 25-75 psi; max differential 125 psi; reduced-pressure fall-off
+          ~0.20 psi/gpm (10 psi @ 50 gpm). cyclestopvalves.com catalog p.12
     TANK  Amtrol WellXTrol. Boyle's law drawdown; precharge = cut-in - 2.
           dP/dt = P^2 * Qnet / (P0_abs * Vtank). amtrol.com / thedriller.com
     HEADS Q = K*sqrt(P). Rain Bird 1800 sprays / Hunter PGP rotors.
@@ -95,7 +96,7 @@
 <body>
 <header>
   <h1>💧 Cycle-Stop Valve Pump System Simulator</h1>
-  <p>Selectable 3 HP / 35 GPM pump (Flint &amp; Walling 4F35S30 or Franklin Electric 35JS3S4) · CSV3A + CSV1A pilot · Amtrol WellXTrol tank · 40/60 switch · live transient model</p>
+  <p>Selectable 3 HP / 35 GPM pump (Flint &amp; Walling 4F35S30 or Franklin Electric 35JS3S4) · CSV2W constant-pressure valve · Amtrol WellXTrol tank · 40/60 switch · live transient model</p>
 </header>
 
 <div class="wrap">
@@ -128,7 +129,7 @@
       <div class="card">
         <div class="chead">
           <h3>Cycle-stop valve characteristic</h3>
-          <span class="badge"><a href="https://cyclestopvalves.com/pages/csv3a-csv3b" target="_blank" rel="noopener">CSV3A specs ↗</a> · inlet vs outlet</span>
+          <span class="badge"><a href="https://cyclestopvalves.com/pages/csv1a-csv2w1-25-general-information" target="_blank" rel="noopener">CSV2W specs ↗</a> · inlet vs outlet</span>
         </div>
         <canvas id="csvcurve" width="780" height="320"></canvas>
         <div class="note" id="csvnote"></div>
@@ -178,8 +179,8 @@
       </div>
 
       <div class="ctl" id="setpointCtl">
-        <label><span id="setpointLbl">CSV hold pressure</span> <b id="vCsv">50</b> psi</label>
-        <input id="csv" type="range" min="20" max="70" value="50" step="1">
+        <label><span id="setpointLbl">CSV2W set pressure</span> <b id="vCsv">50</b> psi</label>
+        <input id="csv" type="range" min="25" max="75" value="50" step="1">
       </div>
 
       <div class="row ctl">
@@ -233,7 +234,7 @@
     Motor &amp; cooling —
     <a href="https://www.franklinwater.com/resources/franklin-aim" target="_blank" rel="noopener">Franklin AIM Manual (motor specs Table 13; cooling flow Table 6 — flow sleeve required in open water)</a>.
     Cycle Stop Valve —
-    <a href="https://cyclestopvalves.com/pages/csv3a-csv3b" target="_blank" rel="noopener">CSV3A/3B general info</a>,
+    <a href="https://cyclestopvalves.com/pages/csv1a-csv2w1-25-general-information" target="_blank" rel="noopener">CSV2W general info</a>,
     <a href="https://cyclestopvalves.com/pages/basic-operation-of-a-cycle-stop-valve" target="_blank" rel="noopener">basic operation</a>,
     <a href="https://cyclestopvalves.com/pages/sizing-a-pressure-tank-with-a-csv" target="_blank" rel="noopener">tank sizing</a>.
     Tank —
@@ -253,9 +254,14 @@ const STATIC_LIFT_PSI = STATIC_LIFT_FT * PSI_PER_FT;   // 4.335 psi
 const KF_FT = 0.022;                    // friction coeff ft/gpm^2 (1.25" PVC,100ft)
 const KF_PSI = KF_FT * PSI_PER_FT;      // ~0.00954 psi/gpm^2  (pump -> CSV riser)
 const KF_LAT = 0.012;                   // lateral friction psi/gpm^2 (tank -> heads)
-const CSV_MIN = 5.0;                    // CSV3A minimum continuous bypass (gpm)
-const CSV_MIN_DROP = 7.0;               // CSV3A min friction loss to regulate (psi)
-const CSV_DIFF_MAX = 125;               // single-valve recommended max differential (psi)
+// Cycle Stop Valves CSV2W (1-1/4" bronze, 5-50 GPM) — manufacturer catalog specs.
+const CSV_MIN = 5.0;                    // CSV2W min control / tank-fill rate (gpm)
+const CSV_MIN_DROP = 7.0;               // min inlet-over-outlet drop to regulate (psi)
+const CSV_DIFF_MAX = 125;               // CSV2W max differential pressure (psi)
+const CSV_FALLOFF_K = 0.20;             // reduced-pressure fall-off: 10 psi @ 50 gpm
+// CSV2W "reduced pressure fall off" (NOT friction): the regulated outlet droops below
+// the set pressure as flow rises — ~0.20 psi/gpm (catalog: 10 psi at 50 gpm).
+function csvFalloff(Q){ return CSV_FALLOFF_K * Math.max(0, Q); }
 const PUMP_RUNOUT = 50;                 // approx max flow for display clamps
 
 // ---- Pump library — two real, authentic pumps, both 3 HP / 35 GPM / 4" ----------
@@ -415,25 +421,29 @@ function step(dtMin){
 
   let Qreturn = 0;                               // flow recirculated to cistern (return line)
   if(params.mode==='csv'){
-    // ===================== CSV SYSTEM =====================
-    const Qreg = solveDemand(A, setp).Q;         // demand if tank held at setpoint
-    // CSV holds setpoint only if pump discharge exceeds it by the min valve drop
-    const canRegulate = pumpDischarge(Qreg) >= setp + CSV_MIN_DROP;
+    // ===================== CSV SYSTEM (CSV2W) =====================
+    // The CSV2W holds the set pressure MINUS a flow-dependent "reduced pressure fall off".
+    // Regulated outlet Preg and the demand it produces are coupled (Preg depends on Q,
+    // Q depends on Preg) — solve the fixed point with a few iterations.
+    let Qreg = solveDemand(A, setp).Q, Preg = setp;
+    for(let i=0;i<4;i++){ Preg = setp - csvFalloff(Qreg); Qreg = solveDemand(A, Preg).Q; }
+    // CSV holds the regulated pressure only if pump discharge exceeds it by the min drop
+    const canRegulate = pumpDischarge(Qreg) >= Preg + CSV_MIN_DROP;
     if(pumpOn){
       if(canRegulate){
-        if(Pd < setp - 0.05){
-          // pressurizing: pump rides up its curve, charging tank to the setpoint
+        if(Pd < Preg - 0.05){
+          // pressurizing: pump rides up its curve, charging tank to the regulated pressure
           regime = "pressurizing";
           Qpump = pumpFlowAtPressure(Pd);
           Qnet  = Qpump - solveDemand(A, Pd).Q;        // >0 into tank
           Vair  = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
           Pd    = pFromVair(Vair);
-          if(Pd >= setp){ Pd = setp; Vair = vairAtP(setp); }
+          if(Pd >= Preg){ Pd = Preg; Vair = vairAtP(Preg); }
         } else if(Qreg >= CSV_MIN){
-          // pinned: pump runs continuously, tank static at setpoint
+          // pinned: pump runs continuously, tank static at the regulated (drooped) pressure
           regime = "regulating";
           Qpump = Qreg; Qnet = 0;
-          Pd = setp; Vair = vairAtP(setp);
+          Pd = Preg; Vair = vairAtP(Preg);
         } else {
           // near-zero demand: 5 gpm min bypass over-fills tank toward cut-out
           regime = "bypass-fill";
@@ -706,10 +716,10 @@ function drawSchematic(){
     g.lineTo(18*Math.cos(openAng),18*Math.sin(openAng)); g.stroke();
     g.restore();
     g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI'; g.textAlign='center';
-    g.fillText('CSV3A', X.csv, midY-44);
+    g.fillText('CSV2W', X.csv, midY-44);
     g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
     g.fillText(S.pumpOn?(Math.round((1-S.throttle)*100)+'% open'):'—', X.csv, midY+48);
-    g.fillText('hold '+params.csv+' psi', X.csv, midY+62);
+    g.fillText('set '+params.csv+' psi', X.csv, midY+62);
     g.fillStyle='#ffc24b'; g.font='10px Segoe UI';
     g.fillText('in '+S.Pcsvin.toFixed(0)+' psi', X.csv, midY-36);
   } else if(params.mode==='return'){
@@ -933,19 +943,21 @@ function drawCsvCurve(){
   // inlet curve = pump discharge at CSV inlet
   g.strokeStyle='#ffc24b'; g.lineWidth=2; g.beginPath();
   for(let q=0;q<=Qm;q+=0.5){ const p=Math.max(0,pumpDischarge(q)),xx=X(q),yy=Y(p); q?g.lineTo(xx,yy):g.moveTo(xx,yy);} g.stroke();
-  // outlet (regulated) line: flat at setpoint over regulating range, then follows inlet (droop)
+  // outlet (regulated) line: CSV2W droops below the set pressure as flow rises
+  // (reduced-pressure fall-off), then follows the inlet once regulation is lost.
   g.strokeStyle='#39b7ff'; g.lineWidth=2.5; g.beginPath();
-  g.moveTo(X(CSV_MIN),Y(setp)); g.lineTo(X(QregMax),Y(setp));
+  g.moveTo(X(CSV_MIN),Y(setp-csvFalloff(CSV_MIN)));
+  for(let q=CSV_MIN;q<=QregMax;q+=0.5){ g.lineTo(X(q),Y(setp-csvFalloff(q))); }
   for(let q=QregMax;q<=Qm;q+=0.5){ g.lineTo(X(q),Y(Math.max(0,pumpDischarge(q)))); } g.stroke();
   // bypass-zone outlet (dashed, below 5 gpm it fills tank toward cut-out)
   g.setLineDash([4,3]); g.strokeStyle='#7c5cff';
-  g.beginPath(); g.moveTo(X(0),Y(params.cout)); g.lineTo(X(CSV_MIN),Y(setp)); g.stroke(); g.setLineDash([]);
+  g.beginPath(); g.moveTo(X(0),Y(params.cout)); g.lineTo(X(CSV_MIN),Y(setp-csvFalloff(CSV_MIN))); g.stroke(); g.setLineDash([]);
   // setpoint + zone labels
   g.font='9px Segoe UI'; g.textAlign='center';
   g.fillStyle='#ffd281'; g.fillText('cycling', X(CSV_MIN/2), T+11);
   g.fillStyle='#7ee0a4'; g.fillText('regulating', X((CSV_MIN+QregMax)/2), T+11);
   if(QregMax<Qm-3){ g.fillStyle='#ff8b96'; g.fillText('overdrive', X((QregMax+Qm)/2), T+11); }
-  g.fillStyle='#9fdcff'; g.textAlign='left'; g.fillText('outlet '+setp+' psi', X(CSV_MIN)+4, Y(setp)-4);
+  g.fillStyle='#9fdcff'; g.textAlign='left'; g.fillText('outlet (set '+setp+', droops)', X(CSV_MIN)+4, Y(setp)-4);
   g.fillStyle='#ffc24b'; g.textAlign='center'; g.fillText('inlet = pump discharge', X(26), Y(pumpDischarge(26))-6);
   // 125 psi max-differential limit: line at inlet = setpoint + 125 (low-flow end)
   const pLimit = setp + CSV_DIFF_MAX;
@@ -1003,7 +1015,7 @@ bind('mode', e=>{
   params.mode=e.value;
   // the setpoint slider means different things per mode
   const lbl=document.getElementById('setpointLbl'), ctl=document.getElementById('setpointCtl');
-  lbl.textContent = params.mode==='return' ? 'Return/relief pressure' : 'CSV hold pressure';
+  lbl.textContent = params.mode==='return' ? 'Return/relief pressure' : 'CSV2W set pressure';
   ctl.style.opacity = params.mode==='neither' ? 0.4 : 1;   // setpoint unused in 'neither'
   // CSV and conventional systems use the standard 40/60 switch — restore it
   if(params.mode==='csv' || params.mode==='neither'){
@@ -1030,7 +1042,7 @@ function enforceOrder(){
   document.getElementById('vCsv').textContent=params.csv;
   const note=document.getElementById('ordering');
   if(params.mode==='csv')
-    note.innerHTML = `CSV holds <b>${params.csv}</b> psi, between cut-in <b>${params.cin}</b> and cut-out <b>${params.cout}</b> · tank precharge <b>${params.cin-2}</b> psi`;
+    note.innerHTML = `CSV2W set to <b>${params.csv}</b> psi, between cut-in <b>${params.cin}</b> and cut-out <b>${params.cout}</b> · tank precharge <b>${params.cin-2}</b> psi`;
   else if(params.mode==='return')
     note.innerHTML = params.csv < params.cout
       ? `Relief at <b>${params.csv}</b> psi (below cut-out <b>${params.cout}</b>) — relief holds, pump runs continuously`
@@ -1080,7 +1092,7 @@ function updateText(){
     else if(S.regime==='tank empty') msg=`No valve — tank empty, pump off, no water reaching the heads.`;
     else msg=`No valve — pump off, tank drawing down toward cut-in (${params.cin} psi), where it restarts.${shortCyc}`;
   }
-  else if(S.regime==='regulating') msg=`Active demand ${S.Qdem.toFixed(1)} gpm ≥ 5 gpm bypass. CSV throttles the pump up its curve (pump reads ${S.Ppump.toFixed(0)} psi) to hold the system at ${params.csv} psi. <b>Pump runs continuously — no cycling.</b>`;
+  else if(S.regime==='regulating') msg=`Active demand ${S.Qdem.toFixed(1)} gpm ≥ 5 gpm bypass. The CSV2W throttles the pump up its curve (pump reads ${S.Ppump.toFixed(0)} psi) to hold the system near ${S.Pd.toFixed(0)} psi (set ${params.csv}). <b>Pump runs continuously — no cycling.</b>`;
   else if(S.regime==='pressurizing') msg=`Pressurizing: pump pushing ${S.Qpump.toFixed(0)} gpm to bring the system up to the ${params.csv} psi setpoint.`;
   else if(S.regime==='bypass-fill') msg=`Demand below the 5 gpm CSV minimum. The bypass over-fills the tank toward cut-out; the pump shuts off at ${params.cout} psi, then slowly cycles.${shortCyc||' <span class="warn">Slow cycling at near-zero demand is expected CSV behavior.</span>'}`;
   else if(S.regime==='overdrive') msg=`Demand exceeds what the pump can deliver at ${params.csv} psi. CSV is wide open, can't regulate — system pressure falls to ~${S.Pd.toFixed(0)} psi and the pump runs flat out. Reduce heads to restore regulation.`;
@@ -1122,15 +1134,16 @@ function updateText(){
   document.getElementById('coolnote').innerHTML=cool;
 
   // valve note
-  const drop = Math.max(0, S.Pcsvin - params.csv);
+  const drop = Math.max(0, S.Pcsvin - S.Pd);          // actual throttling drop (inlet − outlet)
+  const droop = csvFalloff(S.Qpump);                  // CSV2W reduced-pressure fall-off
   let cn;
   if(params.mode==='return') cn=`<span style="color:#ffc24b">Return line.</span> A relief valve recirculates the pump's excess flow back to the cistern, holding the system at the threshold. The pump never cycles, but it runs continuously at full flow — efficient on the motor, wasteful on energy (it pumps water it doesn't use). Contrast the low-flow CSV operating point on the pump curve.`;
   else if(params.mode==='neither') cn='<span style="color:var(--muted)">No valve.</span> Without pressure regulation the pump can only cycle on/off via the 40/60 switch — watch the cycles/hr and the sawtooth on the pressure chart. A bigger tank is the only way to slow the cycling.';
   else if(!S.pumpOn) cn='Pump off — valve idle. Tank holds system pressure.';
   else if(S.regime==='overdrive') cn=`<span style="color:var(--red)">Overdrive:</span> demand exceeds pump capacity at ${params.csv} psi, so the valve is wide open and can no longer hold the setpoint — outlet dropped to ~${S.Pd.toFixed(0)} psi (follows the pump curve).`;
   else if(q<CSV_MIN) cn=`Below the 5 gpm minimum — valve at min bypass, filling the tank. Outlet rides above setpoint toward cut-out.`;
-  else { cn=`<span style="color:var(--green)">Regulating:</span> inlet <b>${S.Pcsvin.toFixed(0)} psi</b> → outlet held at <b>${params.csv} psi</b>. The valve is absorbing <b>${drop.toFixed(0)} psi</b> of throttling drop at ${q.toFixed(1)} gpm.`;
-    if(drop>CSV_DIFF_MAX) cn+=` <span style="color:var(--red)">⚠ exceeds the ${CSV_DIFF_MAX} psi single-valve differential limit.</span>`;
+  else { cn=`<span style="color:var(--green)">Regulating:</span> inlet <b>${S.Pcsvin.toFixed(0)} psi</b> → outlet <b>${S.Pd.toFixed(0)} psi</b> (set ${params.csv}, ${droop.toFixed(0)} psi reduced-pressure fall-off at ${q.toFixed(1)} gpm). The valve absorbs <b>${drop.toFixed(0)} psi</b> of throttling drop.`;
+    if(drop>CSV_DIFF_MAX) cn+=` <span style="color:var(--red)">⚠ exceeds the CSV2W ${CSV_DIFF_MAX} psi max differential.</span>`;
   }
   document.getElementById('csvnote').innerHTML=cn;
 }
@@ -1196,6 +1209,9 @@ function selfTest(){
   params.sleeve=4; approx(coolingMinFlow(),  1.2, 0.3, '4″ casing min cooling flow ≈ 1.2 gpm (Table 6)');
   approx(coolingVel(20), 4.21, 0.2, '4″ sleeve @ 20 gpm ≈ 4.2 ft/s (well cooled)');
   params.sleeve=sv;
+  // CSV2W reduced-pressure fall-off (catalog chart: 10 psi @ 50 gpm)
+  approx(csvFalloff(50), 10.0, 0.1, 'CSV2W reduced-pressure fall-off ≈ 10 psi @ 50 gpm');
+  approx(csvFalloff(25),  5.0, 0.1, 'CSV2W reduced-pressure fall-off ≈ 5 psi @ 25 gpm');
   // ---- Franklin Electric 35JS3S4 pump (14-stage) ----
   const pv=params.pump, fwBep=pumpBHP(35);     // F&W shaft load at its BEP
   params.pump='fe';
