@@ -148,12 +148,12 @@
         <label>Scenario / proposal</label>
         <select id="scenario">
           <option value="existing" selected>Existing — CSV2W + fixed-speed motor</option>
-          <option value="A">Proposal A — VFD, reuse existing pump end</option>
+          <option value="A">Proposal A — VFD, reuse existing F&amp;W pump</option>
           <option value="B">Proposal B — VFD + new 1.5 HP Tri-Seal pump</option>
         </select>
       </div>
       <div class="ctl" id="pumpCtl">
-        <label>Pump end (3 HP · 35 GPM · 4″)</label>
+        <label id="pumpLbl">Pump end (3 HP · 35 GPM · 4″)</label>
         <select id="pump">
           <option value="fw" selected>Flint &amp; Walling 4F35S30 · 10-stage</option>
           <option value="fe">Franklin Electric 35JS3S4 · 14-stage</option>
@@ -301,8 +301,13 @@ const PUMPS = {
         eff:[[5,20],[10,36],[15,46],[20,53],[25,58],[30,60.5],[32,61],[35,60],[40,55],[45,46],[50,36],[55,24]],
         bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:110 } }
 };
-// Active pump end depends on scenario: B uses the new 1.5HP Tri-Seal; else the selection.
-function pump(){ return PUMPS[params.scenario==='B' ? 'fps15' : params.pump]; }
+// Active pump end depends on scenario: Proposal A reuses the existing F&W 4F35S30,
+// Proposal B uses the new 1.5HP Tri-Seal; the Existing baseline uses the selector.
+function pump(){
+  if(params.scenario==='A') return PUMPS.fw;       // reuse the existing F&W pump only
+  if(params.scenario==='B') return PUMPS.fps15;    // new 1.5HP Tri-Seal pump end
+  return PUMPS[params.pump];
+}
 // live operating-range bands of the active pump (reassigned on pump/scenario change)
 let PUMP_BANDS = PUMPS.fw.bands;
 
@@ -1118,10 +1123,17 @@ function refreshPumpUI(){
 bind('pump', e=>{ params.pump=e.value; refreshPumpUI(); S.starts=[]; S.cyclesPerHr=0; });
 bind('scenario', e=>{ params.scenario=e.value; applyScenario(); S.starts=[]; S.cyclesPerHr=0; });
 function applyScenario(){
-  const vfd = drive()==='vfd';
-  // Proposal B forces the new 1.5HP Tri-Seal pump end; existing/A use the pump selector.
+  const vfd = drive()==='vfd', sc = params.scenario;
+  // Pump end is fixed by both proposals: A reuses the existing F&W, B is the new 1.5HP.
   const pumpCtl=document.getElementById('pumpCtl'), pumpSel=document.getElementById('pump');
-  pumpCtl.style.opacity = params.scenario==='B' ? 0.45 : 1; pumpSel.disabled = params.scenario==='B';
+  const locked = sc!=='existing';
+  pumpCtl.style.opacity = locked ? 0.6 : 1; pumpSel.disabled = locked;
+  if(sc==='A') pumpSel.value='fw';                 // show the reused F&W pump
+  else if(sc==='existing') pumpSel.value=params.pump;
+  document.getElementById('pumpLbl').textContent =
+    sc==='A' ? 'Pump end — reused F&W 4F35S30 (existing)'
+    : sc==='B' ? 'Pump end — new Franklin 1.5 HP Tri-Seal'
+    : 'Pump end (3 HP · 35 GPM · 4″)';
   // VFD scenarios remove the CSV / return / neither choice — the drive controls pressure
   const modeCtl=document.getElementById('modeCtl'), modeSel=document.getElementById('mode');
   modeCtl.style.opacity = vfd ? 0.45 : 1; modeSel.disabled = vfd;
