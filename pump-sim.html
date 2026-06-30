@@ -96,7 +96,7 @@
 <body>
 <header>
   <h1>💧 Cycle-Stop Valve Pump System Simulator</h1>
-  <p>Selectable 3 HP / 35 GPM pump (Flint &amp; Walling 4F35S30 or Franklin Electric 35JS3S4) · CSV2W constant-pressure valve · Amtrol WellXTrol tank · 40/60 switch · live transient model</p>
+  <p>Compare the existing CSV2W system vs. Proposal A &amp; B (Franklin SubDrive 30 VFD) · selectable 35 GPM pump end · Amtrol WellXTrol tank · live transient model</p>
 </header>
 
 <div class="wrap">
@@ -145,13 +145,21 @@
         </div>
       </div>
       <div class="ctl">
-        <label>Pump (3 HP · 35 GPM · 4″)</label>
+        <label>Scenario / proposal</label>
+        <select id="scenario">
+          <option value="existing" selected>Existing — CSV2W + fixed-speed motor</option>
+          <option value="A">Proposal A — VFD, reuse existing pump end</option>
+          <option value="B">Proposal B — VFD + new 1.5 HP Tri-Seal pump</option>
+        </select>
+      </div>
+      <div class="ctl" id="pumpCtl">
+        <label>Pump end (3 HP · 35 GPM · 4″)</label>
         <select id="pump">
           <option value="fw" selected>Flint &amp; Walling 4F35S30 · 10-stage</option>
           <option value="fe">Franklin Electric 35JS3S4 · 14-stage</option>
         </select>
       </div>
-      <div class="ctl">
+      <div class="ctl" id="modeCtl">
         <label>System type</label>
         <select id="mode">
           <option value="csv" selected>Cycle Stop Valve (constant pressure)</option>
@@ -282,15 +290,28 @@ const PUMPS = {
         H0:171.7, k:0.05811, churn:1.4,
         url:'https://franklinwater.com/',
         eff:[[5,20],[10,36],[15,46],[20,53],[25,58],[30,60.5],[32,61],[35,60],[40,55],[45,46],[50,36],[55,24]],
-        bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:180 } }
+        bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:180 } },
+  // Proposal B pump end: Franklin FPS Tri-Seal 35 GPM, 1.5 HP high-capacity (7-stage).
+  // Curve fit to Franklin's published 35 GPM 1.5 HP performance (shutoff 226 ft/98 psi,
+  // <2 psi rms over 48 pts). Right-sized for a constant-pressure system; on a 3 HP
+  // MagForce motor it loads only ~1.2-1.5 HP, leaving reserve torque (runs cooler).
+  fps15: { name:'Franklin FPS Tri-Seal 35GPM 1.5HP', short:'FPS 35GPM 1.5HP', stages:7,
+        H0:98.0, k:0.03568, churn:0.7, ratedHP:1.5,
+        url:'https://franklinwater.com/',
+        eff:[[5,20],[10,36],[15,46],[20,53],[25,58],[30,60.5],[32,61],[35,60],[40,55],[45,46],[50,36],[55,24]],
+        bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:110 } }
 };
-function pump(){ return PUMPS[params.pump]; }
-// live operating-range bands of the selected pump (reassigned on pump change)
+// Active pump end depends on scenario: B uses the new 1.5HP Tri-Seal; else the selection.
+function pump(){ return PUMPS[params.scenario==='B' ? 'fps15' : params.pump]; }
+// live operating-range bands of the active pump (reassigned on pump/scenario change)
 let PUMP_BANDS = PUMPS.fw.bands;
 
-// Pump head-flow curve of the selected pump: P(Q) psi, Q gpm.
-function pumpPsi(Q){ const p=pump(); return p.H0 - p.k * Q*Q; }
-// Pressure available at CSV inlet after lift + pipe friction
+// Pump head-flow curve at a given SPEED FRACTION s (affinity laws): a full-speed point
+// (Q1,H1) maps to (s*Q1, s^2*H1), so the reduced parabola is H = s^2*H0 - k*Q^2.
+function pumpPsiAt(Q, s){ const p=pump(); return s*s*p.H0 - p.k * Q*Q; }
+// Full-speed gross head (s=1) — used by the fixed-speed CSV path.
+function pumpPsi(Q){ return pumpPsiAt(Q, 1); }
+// Pressure available at CSV inlet after lift + pipe friction (full speed)
 function pumpDischarge(Q){ return pumpPsi(Q) - STATIC_LIFT_PSI - KF_PSI*Q*Q; }
 // ---- Motor loading & current --------------------------------------------------
 function pumpEff(Q){                           // fraction 0..1 (selected pump's dome)
@@ -300,13 +321,16 @@ function pumpEff(Q){                           // fraction 0..1 (selected pump's
     const [q0,e0]=P[i-1],[q1,e1]=P[i]; return (e0+(e1-e0)*(Q-q0)/(q1-q0))/100; } }
   return P[P.length-1][1]/100;
 }
-// Brake (shaft) horsepower from real hydraulics: WHP / efficiency, with a churn floor
-// near shutoff (pump still absorbs power at ~0 flow). WHP = Q*head_ft/3960.
-function pumpBHP(Q){
-  const Hf = pumpPsi(Q)/PSI_PER_FT;            // head in feet
+// Brake (shaft) horsepower from real hydraulics at speed fraction s: WHP/efficiency,
+// with a churn floor (∝ s³) near shutoff. Efficiency is read at the homologous full-
+// speed flow Q/s (affinity preserves efficiency along iso-speed points).
+function pumpBHPat(Q, s){
+  const Hf = pumpPsiAt(Q,s)/PSI_PER_FT;        // head in feet at this speed
   const whp = Q*Hf/3960;
-  return Math.max(pump().churn, whp/Math.max(pumpEff(Q),0.05));
+  const effFlow = s>0.02 ? Q/s : Q;
+  return Math.max(pump().churn*s*s*s, whp/Math.max(pumpEff(effFlow),0.05));
 }
+function pumpBHP(Q){ return pumpBHPat(Q, 1); }
 // Line current (A) of the Franklin 3HP/230V/1ph motor (AIM Table 13, model 224302).
 // Anchored EXACTLY to the two published load points: full load 3.0HP -> 14.0A / 2940W,
 // service-factor load 3.45HP -> 17.0A / 3350W.  Input-power linear in shaft power;
@@ -319,6 +343,17 @@ function pumpAmps(bhp){
   const Imag = Psh<=2237 ? 5.7 : 5.7+(8.75-5.7)*(Psh-2237)/(2572-2237);
   return Math.hypot(Iact, Imag);
 }
+// ---- Variable-speed drive (Proposals A & B): Franklin SubDrive Connect 30 + MagForce ----
+// SubDrive Connect 30: constant-pressure VFD, single-phase 230 V input -> 3-phase output,
+// ~3 HP class, NEMA 3R. Drives a Franklin 4" MagForce 3-phase motor (rated 3.0 HP here).
+// The drive holds the set pressure by varying pump SPEED (affinity), so there is no valve
+// throttling and no on/off cycling above a small minimum flow.
+const VFD_SMIN = 0.35;            // minimum speed fraction the drive will hold pressure at
+const MAG_EFF = 0.86;             // MagForce motor efficiency (high-eff, ~constant)
+const DRIVE_EFF = 0.96;           // VFD power-stage efficiency
+// Single-phase input amps drawn from the 230 V supply by the drive at a given shaft HP.
+function driveInputAmps(bhp){ return bhp*745.7 / (MAG_EFF*DRIVE_EFF) / MOTOR_V; }
+function drive(){ return params.scenario==='existing' ? 'fixed' : 'vfd'; }
 // ---- Motor cooling (Franklin AIM Manual, "Water Temperature and Flow") ---------
 // BOTH pumps drive the same Franklin 4" 3 HP motor (224302) — F&W's 3 HP+ ends ship
 // with a Franklin motor — so the cooling requirement is identical and motor-defined,
@@ -341,14 +376,15 @@ function coolingMinFlow(){        // gpm needed to reach COOL_VMIN for the chose
   if(params.sleeve<=0) return Infinity;
   return COOL_VMIN * (params.sleeve*params.sleeve - MOTOR_OD*MOTOR_OD) / 0.4085;
 }
-// Flow the pump delivers when its discharge equals a given downstream pressure
-function pumpFlowAtPressure(P){
+// Flow the pump delivers (at speed fraction s) when its discharge equals pressure P
+function pumpFlowAtPressureSpeed(P, s){
   const p = pump();
-  const C1 = p.H0 - STATIC_LIFT_PSI;
+  const C1 = s*s*p.H0 - STATIC_LIFT_PSI;
   const C2 = p.k + KF_PSI;
   const v = (C1 - P)/C2;
   return v>0 ? Math.sqrt(v) : 0;
 }
+function pumpFlowAtPressure(P){ return pumpFlowAtPressureSpeed(P, 1); }
 // Ideal sprinkler zone demand at a given head pressure: Q = N*K*sqrt(P)
 function sprinklerDemand(A, P){ return A * Math.sqrt(Math.max(P,0)); }
 
@@ -387,7 +423,8 @@ const params = {
   N:6, K:0.29, csv:50, cin:40, cout:60, Vtank:20, speed:10,
   power:true, mode:'csv', elev:0,  // mode: 'csv' | 'return' | 'neither';  elev ft, + above pump
   sleeve:4,                         // motor flow-sleeve / casing ID (in); 0 = none (open cistern)
-  pump:'fw'                         // 'fw' = Flint & Walling 4F35S30 | 'fe' = Franklin 35JS3S4
+  pump:'fw',                        // 'fw' = Flint & Walling 4F35S30 | 'fe' = Franklin 35JS3S4
+  scenario:'existing'               // 'existing' = CSV2W + fixed speed | 'A' = VFD reuse pump | 'B' = VFD + new 1.5HP
 };
 let S = null;
 function precharge(){ return params.cin - 2; }
@@ -400,7 +437,7 @@ function resetSim(){
   S = {
     pumpOn: params.power, Pd: startP, Vair: vairAtP(startP),
     Qpump:0, Qdem:0, Qnet:0, Qreturn:0, regime:"—", t:0,
-    Ppump:0, Pcsvin:0, Phead:startP, throttle:0, BHP:0,
+    Ppump:0, Pcsvin:0, Phead:startP, throttle:0, BHP:0, speed:1, amps:0, pctFL:0,
     starts:[], cyclesPerHr:0, hist:[]   // hist: {t, Pd, on}
   };
 }
@@ -420,7 +457,50 @@ function step(dtMin){
   const Pnat = naturalPressure(A);               // valve-open / no-CSV operating pressure
 
   let Qreturn = 0;                               // flow recirculated to cistern (return line)
-  if(params.mode==='csv'){
+  let speed = 1;                                 // pump speed fraction (VFD); 1 = full speed
+  if(drive()==='vfd'){
+    // ===================== VARIABLE-SPEED DRIVE (Proposals A & B) =====================
+    // SubDrive holds the set pressure by varying pump speed (affinity), no valve/throttle.
+    const Ptgt = setp, p = pump();
+    if(pumpOn){
+      const Qd = solveDemand(A, Ptgt).Q;                 // demand at the held pressure
+      // speed s so pump discharge = Ptgt at flow Qd:  s²·H0 − (k+KF)·Qd² − lift = Ptgt
+      const need = (Ptgt + STATIC_LIFT_PSI + (p.k+KF_PSI)*Qd*Qd) / p.H0;
+      let s = need>0 ? Math.sqrt(need) : 0;
+      if(s <= 1.0){
+        if(s >= VFD_SMIN){
+          // constant pressure at variable speed — continuous, no cycling
+          regime = "vfd-regulating";
+          speed = s; Qpump = Qd; Qnet = 0;
+          Pd = Ptgt; Vair = vairAtP(Ptgt);
+        } else {
+          // demand below min-speed flow: drive idles at min speed, gently tops off the
+          // tank, then sleeps; wakes when pressure drops (minimal cycling at ~zero demand)
+          regime = "vfd-idle";
+          speed = VFD_SMIN;
+          Qpump = pumpFlowAtPressureSpeed(Pd, VFD_SMIN);
+          Qnet  = Qpump - solveDemand(A, Pd).Q;
+          Vair  = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+          Pd    = pFromVair(Vair);
+        }
+      } else {
+        // demand exceeds full-speed capacity at the target — run full speed, pressure droops
+        regime = "vfd-maxspeed";
+        speed = 1;
+        Qpump = pumpFlowAtPressure(Pd);
+        Qnet  = Qpump - solveDemand(A, Pd).Q;
+        Vair  = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+        Pd = (Vair >= VairEmpty - 1e-6) ? Pd + (Pnat - Pd)*Math.min(1,dtMin*8) : pFromVair(Vair);
+      }
+    } else {
+      regime = params.power ? "drive asleep" : "powered down";
+      Qpump = 0; Qnet = -solveDemand(A, Pd).Q;
+      Vair = clamp(Vair - Qnet*dtMin, VairFull, VairEmpty);
+      if(Vair >= VairEmpty - 1e-6){ if(solveDemand(A,Pd).Q > 0.001) regime="tank empty";
+        Pd = Math.max(0, Pd * (1 - Math.min(1, 18*dtMin))); }
+      else Pd = pFromVair(Vair);
+    }
+  } else if(params.mode==='csv'){
     // ===================== CSV SYSTEM (CSV2W) =====================
     // The CSV2W holds the set pressure MINUS a flow-dependent "reduced pressure fall off".
     // Regulated outlet Preg and the demand it produces are coupled (Preg depends on Q,
@@ -551,17 +631,19 @@ function step(dtMin){
   if(!S.starts.length || (S.t - S.starts[S.starts.length-1]) > 20) S.cyclesPerHr = 0; // gone continuous
 
   // ---- final derived readouts from the settled system pressure ----
+  const vfd = drive()==='vfd';
   const dem = solveDemand(A, Math.max(0,Pd));
-  const Ppump  = pumpOn ? Math.max(0, pumpPsi(Qpump))      : 0;  // gross head, right at pump
-  const Pcsvin = pumpOn ? Math.max(0, pumpDischarge(Qpump)) : 0; // after riser = CSV inlet
-  const throttle = (pumpOn && params.mode==='csv') ? clamp(1 - Qpump/PUMP_RUNOUT, 0, 1) : 0;
+  const Ppump  = pumpOn ? Math.max(0, pumpPsiAt(Qpump, speed))      : 0;  // gross head at pump (at speed)
+  const Pcsvin = pumpOn ? Math.max(0, pumpPsiAt(Qpump,speed)-STATIC_LIFT_PSI-KF_PSI*Qpump*Qpump) : 0; // after riser
+  const throttle = (pumpOn && params.mode==='csv' && !vfd) ? clamp(1 - Qpump/PUMP_RUNOUT, 0, 1) : 0;
 
   S.Pd=Pd; S.Vair=Vair; S.pumpOn=pumpOn;
   S.Qpump=Qpump; S.Qdem=dem.Q; S.Qnet=Qpump-dem.Q; S.Qreturn=Qreturn; S.regime=regime;
   S.Ppump=Ppump; S.Pcsvin=Pcsvin; S.Phead=dem.Phead;
-  S.throttle=throttle; S.BHP=pumpOn?pumpBHP(Qpump):0; S.Pnat=Pnat;
-  // motor loading & current
-  S.amps = pumpOn ? pumpAmps(S.BHP) : 0;
+  S.throttle=throttle; S.BHP=pumpOn?pumpBHPat(Qpump, speed):0; S.Pnat=Pnat;
+  S.speed = pumpOn ? speed : 0;                   // VFD pump speed fraction
+  // motor loading & current — fixed-speed: 1φ line amps; VFD: 1φ input amps to the drive
+  S.amps = pumpOn ? (vfd ? driveInputAmps(S.BHP) : pumpAmps(S.BHP)) : 0;
   S.pctFL = pumpOn ? 100*S.BHP/MOTOR_FL_HP : 0;
   // motor cooling: flow velocity past the motor (all pump flow passes it)
   S.coolVel = pumpOn ? coolingVel(Qpump) : 0;     // ft/s
@@ -705,7 +787,22 @@ function drawSchematic(){
   }
 
   // ---- valve node (mode-dependent) ----
-  if(params.mode==='csv'){
+  if(drive()==='vfd'){
+    // VFD: the cycle-stop valve is REMOVED — water passes straight through. The SubDrive
+    // controller (surface-mounted) sets motor speed; drawn as a drive box at this node.
+    pipe(g, X.csv-34, midY, X.csv+34, midY, S.Qpump, 16);
+    const on=S.pumpOn, col = on ? '#3ddc84' : '#5a6e8c', spd = on ? S.speed : 0;
+    g.fillStyle='#15273e'; roundRect(g, X.csv-36, midY-60, 72, 40, 8); g.fill();
+    g.lineWidth=2.5; g.strokeStyle=col; roundRect(g, X.csv-36, midY-60, 72, 40, 8); g.stroke();
+    g.fillStyle='#27406a'; roundRect(g, X.csv-27, midY-30, 54, 7, 3); g.fill();   // speed bar
+    g.fillStyle=col; roundRect(g, X.csv-27, midY-30, 54*clamp(spd,0,1), 7, 3); g.fill();
+    g.fillStyle='#cfe0f7'; g.font='600 11px Segoe UI'; g.textAlign='center';
+    g.fillText('SubDrive 30', X.csv, midY-45);
+    g.fillStyle=col; g.font='600 12px Segoe UI';
+    g.fillText(on?(Math.round(spd*100)+'% speed'):'asleep', X.csv, midY+42);
+    g.fillStyle='#9fb3cd'; g.font='10px Segoe UI';
+    g.fillText('VFD · no valve', X.csv, midY+55);
+  } else if(params.mode==='csv'){
     g.fillStyle='#15273e'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.fill();
     g.lineWidth=3; g.strokeStyle='#7c5cff'; roundRect(g, X.csv-30, midY-30, 60, 60, 10); g.stroke();
     // throttle plate
@@ -893,16 +990,25 @@ function drawPumpCurve(){
   g.fillStyle='#ff8b96'; g.fillText('< '+B_.minCont, X(B_.minCont/2), T+11);
   g.fillStyle='#7ee0a4'; g.fillText('best eff. '+B_.porLo+'–'+B_.porHi, X((B_.porLo+B_.porHi)/2), T+11);
   g.fillStyle='#ff8b96'; g.fillText('runout', X((B_.runout+Qm)/2), T+11);
-  // pump curve
+  // pump curve (full speed)
   g.strokeStyle='#7c5cff'; g.lineWidth=2.5; g.beginPath();
   for(let q=0;q<=Qm;q+=0.5){ const p=pumpPsi(q),xx=X(q),yy=Y(p); q?g.lineTo(xx,yy):g.moveTo(xx,yy);} g.stroke();
+  const vfd = drive()==='vfd';
+  // VFD: reduced-speed curve at the current speed (affinity) — the pump rides this lower parabola
+  if(vfd && S.pumpOn && S.speed<0.995){
+    g.strokeStyle='#39b7ff'; g.lineWidth=2; g.setLineDash([5,4]); g.beginPath();
+    for(let q=0;q<=Qm;q+=0.5){ const p=Math.max(0,pumpPsiAt(q,S.speed)),xx=X(q),yy=Y(p); q?g.lineTo(xx,yy):g.moveTo(xx,yy);} g.stroke();
+    g.setLineDash([]);
+    g.fillStyle='#9fdcff'; g.font='9px Segoe UI'; g.textAlign='left';
+    g.fillText((S.speed*100).toFixed(0)+'% speed', X(2), Y(pumpPsiAt(2,S.speed))-5);
+  }
   // BEP marker
   const bx=X(B_.bep), by=Y(pumpPsi(B_.bep));
   g.fillStyle='#eaf2ff'; circle(g,bx,by,3); g.fill();
   g.fillStyle='#cfe0f7'; g.font='9px Segoe UI'; g.textAlign='center'; g.fillText('BEP '+B_.bep, bx, by-7);
-  // live operating point
+  // live operating point (on the reduced-speed curve when VFD)
   if(S.pumpOn){
-    const q=clamp(S.Qpump,0,Qm), p=pumpPsi(q), ox=X(q), oy=Y(p);
+    const q=clamp(S.Qpump,0,Qm), p=vfd?pumpPsiAt(q,S.speed):pumpPsi(q), ox=X(q), oy=Y(p);
     g.strokeStyle='#ffffff55'; g.setLineDash([3,3]); g.lineWidth=1;
     g.beginPath(); g.moveTo(ox,oy); g.lineTo(ox,H-B); g.stroke();
     g.beginPath(); g.moveTo(ox,oy); g.lineTo(L,oy); g.stroke(); g.setLineDash([]);
@@ -980,15 +1086,18 @@ function drawCsvCurve(){
     g.strokeStyle='#fff'; g.lineWidth=2; circle(g,ox,Y(pout),6); g.fill(); g.stroke();
   }
   // non-CSV overlay
-  if(params.mode!=='csv'){
-    g.fillStyle='rgba(11,20,34,0.78)'; g.fillRect(0,0,W,H);
+  if(drive()==='vfd' || params.mode!=='csv'){
+    g.fillStyle='rgba(11,20,34,0.82)'; g.fillRect(0,0,W,H);
     g.textAlign='center';
     g.fillStyle='#9fb3cd'; g.font='600 15px Segoe UI';
-    g.fillText(params.mode==='return'?'Return line (relief to cistern)':'No valve — conventional', W/2, H/2-8);
+    const title = drive()==='vfd' ? 'Cycle-stop valve removed — VFD speed control'
+      : params.mode==='return' ? 'Return line (relief to cistern)' : 'No valve — conventional';
+    g.fillText(title, W/2, H/2-8);
     g.font='11px Segoe UI'; g.fillStyle='#7a8ba5';
-    g.fillText(params.mode==='return'
-      ? 'pump runs full-flow, excess recirculates — see the pump-curve graph'
-      : 'pump cycles 40/60 — see the sawtooth on the pressure chart', W/2, H/2+12);
+    const sub = drive()==='vfd' ? 'SubDrive varies motor speed to hold pressure — see the reduced-speed curve on the pump graph'
+      : params.mode==='return' ? 'pump runs full-flow, excess recirculates — see the pump-curve graph'
+      : 'pump cycles 40/60 — see the sawtooth on the pressure chart';
+    g.fillText(sub, W/2, H/2+12);
   }
 }
 
@@ -1002,8 +1111,26 @@ bind('csv', e=>{ params.csv=+e.value; document.getElementById('vCsv').textConten
 bind('cin', e=>{ params.cin=+e.value; enforceOrder(); });
 bind('cout', e=>{ params.cout=+e.value; enforceOrder(); });
 bind('tank', e=>{ params.Vtank=+e.value; });
-bind('pump', e=>{ params.pump=e.value; PUMP_BANDS=PUMPS[e.value].bands; S.starts=[]; S.cyclesPerHr=0;
-  const a=document.getElementById('pumpCurveLink'); a.textContent=PUMPS[e.value].short+' curve ↗'; a.href=PUMPS[e.value].url; });
+function refreshPumpUI(){
+  const p=pump(); PUMP_BANDS=p.bands;
+  const a=document.getElementById('pumpCurveLink'); a.textContent=p.short+' curve ↗'; a.href=p.url;
+}
+bind('pump', e=>{ params.pump=e.value; refreshPumpUI(); S.starts=[]; S.cyclesPerHr=0; });
+bind('scenario', e=>{ params.scenario=e.value; applyScenario(); S.starts=[]; S.cyclesPerHr=0; });
+function applyScenario(){
+  const vfd = drive()==='vfd';
+  // Proposal B forces the new 1.5HP Tri-Seal pump end; existing/A use the pump selector.
+  const pumpCtl=document.getElementById('pumpCtl'), pumpSel=document.getElementById('pump');
+  pumpCtl.style.opacity = params.scenario==='B' ? 0.45 : 1; pumpSel.disabled = params.scenario==='B';
+  // VFD scenarios remove the CSV / return / neither choice — the drive controls pressure
+  const modeCtl=document.getElementById('modeCtl'), modeSel=document.getElementById('mode');
+  modeCtl.style.opacity = vfd ? 0.45 : 1; modeSel.disabled = vfd;
+  if(vfd){ params.cin=40; params.cout=60;
+    document.getElementById('cin').value=40; document.getElementById('cout').value=60; }
+  document.getElementById('setpointLbl').textContent =
+    vfd ? 'SubDrive set pressure' : (params.mode==='return'?'Return/relief pressure':'CSV2W set pressure');
+  refreshPumpUI(); enforceOrder();
+}
 bind('sleeve', e=>{ params.sleeve=+e.value; });
 bind('speed', e=>{ params.speed=+e.value; document.getElementById('vSpeed').textContent=e.value; });
 bind('elev', e=>{ params.elev=+e.value;
@@ -1033,7 +1160,7 @@ function enforceOrder(){
   if(params.cout <= params.cin){ params.cout = params.cin+1; coutE.value=params.cout; }
   // ONLY the CSV requires the setpoint to sit inside the band — clamp the SETPOINT,
   // never move the switch. The return-line relief pressure is independent of the switch.
-  if(params.mode==='csv'){
+  if(params.mode==='csv' || drive()==='vfd'){
     params.csv = clamp(params.csv, params.cin+1, params.cout-1);
     csvE.value = params.csv;
   }
@@ -1041,7 +1168,9 @@ function enforceOrder(){
   document.getElementById('vCout').textContent=params.cout;
   document.getElementById('vCsv').textContent=params.csv;
   const note=document.getElementById('ordering');
-  if(params.mode==='csv')
+  if(drive()==='vfd')
+    note.innerHTML = `SubDrive holds <b>${params.csv}</b> psi by varying speed; sleeps near cut-out <b>${params.cout}</b>, wakes at cut-in <b>${params.cin}</b> · precharge <b>${params.cin-2}</b> psi`;
+  else if(params.mode==='csv')
     note.innerHTML = `CSV2W set to <b>${params.csv}</b> psi, between cut-in <b>${params.cin}</b> and cut-out <b>${params.cout}</b> · tank precharge <b>${params.cin-2}</b> psi`;
   else if(params.mode==='return')
     note.innerHTML = params.csv < params.cout
@@ -1059,23 +1188,34 @@ function updateText(){
   const coolCol = !S.pumpOn?'var(--muted)':(S.coolOK?'var(--green)':'var(--red)');
   const coolTxt = !S.pumpOn ? '—'
     : params.sleeve<=0 ? 'no sleeve' : S.coolVel.toFixed(2)+' ft/s';
+  const vfd = drive()==='vfd';
   sb.innerHTML =
     `<span>state <b>${S.regime}</b></span>`+
+    (vfd ? `<span>speed <b style="color:var(--water)">${(S.speed*100).toFixed(0)}</b>%</span>` : '')+
     `<span>pump P <b>${S.Ppump.toFixed(0)}</b> psi</span>`+
-    `<span>CSV in <b>${S.Pcsvin.toFixed(0)}</b> psi</span>`+
+    `<span>${vfd?'disch':'CSV in'} <b>${S.Pcsvin.toFixed(0)}</b> psi</span>`+
     `<span>pump Q <b>${S.Qpump.toFixed(1)}</b> gpm</span>`+
-    (params.mode==='return' ? `<span>return Q <b style="color:var(--amber)">${S.Qreturn.toFixed(1)}</b> gpm</span>` : '')+
+    (params.mode==='return' && !vfd ? `<span>return Q <b style="color:var(--amber)">${S.Qreturn.toFixed(1)}</b> gpm</span>` : '')+
     `<span>system P <b>${S.Pd.toFixed(1)}</b> psi</span>`+
     `<span>head P <b>${S.Phead.toFixed(1)}</b> psi</span>`+
     `<span>zone Q <b>${S.Qdem.toFixed(1)}</b> gpm</span>`+
     `<span>tank <b>${(params.Vtank-S.Vair).toFixed(1)}</b> gal</span>`+
-    `<span>motor <b style="color:${ampCol}">${S.amps.toFixed(1)}</b> A · ${S.pctFL.toFixed(0)}% FL</span>`+
+    `<span>${vfd?'drive in':'motor'} <b style="color:${ampCol}">${S.amps.toFixed(1)}</b> A · ${S.pctFL.toFixed(0)}% load</span>`+
     `<span>cooling <b style="color:${coolCol}">${coolTxt}</b></span>`+
     `<span>cycles/hr <b style="color:${cycCol}">${cyc<0.5?'0':cyc.toFixed(0)}</b></span>`;
   let msg='';
   const A=params.N*params.K;
   const shortCyc = cyc>30 ? ` <span style="color:var(--red)">⚠ ${cyc.toFixed(0)} starts/hr — short-cycling, hard on the motor.</span>` : '';
   if(!params.power) msg='Pump powered down — tank drains to demand, then collapses to zero once empty.';
+  else if(drive()==='vfd'){
+    const prop = params.scenario==='A' ? 'Proposal A' : 'Proposal B';
+    const pe = pump().short, hp = params.scenario==='B' ? '1.5 HP' : '3 HP';
+    if(S.regime==='vfd-regulating') msg=`<b>${prop} — SubDrive VFD.</b> Drive holds ${params.csv} psi by running the ${pe} at <b>${(S.speed*100).toFixed(0)}% speed</b> to match ${S.Qdem.toFixed(1)} gpm demand. Shaft load <b>${S.BHP.toFixed(1)} HP</b> (${S.pctFL.toFixed(0)}% of the ${hp} motor); drive pulls ~${S.amps.toFixed(1)} A. <b>No valve, no cycling</b> — and at part speed the motor runs cool with reserve.`;
+    else if(S.regime==='vfd-idle') msg=`${prop}: demand below the drive's minimum-speed flow — SubDrive idles at ${(VFD_SMIN*100).toFixed(0)}% speed, gently tops off the small tank, then sleeps until pressure drops. Far gentler than 40/60 cycling.${shortCyc}`;
+    else if(S.regime==='vfd-maxspeed') msg=`${prop}: demand exceeds what the ${pe} delivers at full speed — drive maxed at 100%, pressure droops to ~${S.Pd.toFixed(0)} psi. Reduce demand to restore ${params.csv} psi.`;
+    else if(S.regime==='tank empty') msg=`${prop} — tank empty, drive asleep, no flow to the heads.`;
+    else msg=`${prop} — drive asleep; tank holds pressure until a fixture opens.`;
+  }
   else if(params.mode==='return'){
     const reliefAbove = params.csv >= params.cout;
     if(S.regime==='return-relief') msg=`<b>Return line:</b> relief valve open — pump runs full-flow at <b>${S.Qpump.toFixed(0)} gpm</b>, ${S.Qdem.toFixed(0)} gpm to the heads and <b>${S.Qreturn.toFixed(0)} gpm recirculated to the cistern</b>. System held at ${params.csv} psi, pump runs continuously (no cycling) but wastes energy pumping water in a circle.`;
@@ -1111,13 +1251,17 @@ function updateText(){
       : q>B_.runout ? `<span style="color:var(--red)">⚠ above the ${B_.runout} GPM maximum — past runout</span>`
       : (q>=B_.porLo&&q<=B_.porHi) ? `<span style="color:var(--green)">in the best-efficiency range (${B_.porLo}–${B_.porHi} GPM)</span>`
       : `<span class="warn">in the operating range (${B_.minCont}–${B_.runout} GPM), outside best efficiency</span>`;
+    const vfd = drive()==='vfd';
     pn=`<b>${pmp.short}</b> (${pmp.stages}-stage) operating at <b>${q.toFixed(1)} gpm / ${S.Ppump.toFixed(0)} psi</b> — ${zone}. `
-      + (params.mode==='csv' ? (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.')
+      + (vfd ? `SubDrive runs it at <b>${(S.speed*100).toFixed(0)}% speed</b> on the reduced-speed (dashed) curve to hold ${params.csv} psi.`
+         : params.mode==='csv' ? (q<B_.bep?'CSV has throttled the pump up its curve (low flow, high pressure).':'High flow, low pressure end of the curve.')
          : params.mode==='return' ? 'Return line: pump runs at the high-flow end, recirculating the excess.'
          : 'No valve: pump sits at the high-flow / low-pressure end and cycles.');
     // motor loading
     const flCol = S.pctFL>115?'var(--red)':S.pctFL>100?'var(--amber)':'var(--green)';
-    pn += ` <span class="badge">Motor drawing <b style="color:${flCol}">${S.amps.toFixed(1)} A</b> (${S.pctFL.toFixed(0)}% of full load; Franklin 3HP 230V·1φ: 14.0 A FL / 17.0 A SF).</span>`;
+    pn += vfd
+      ? ` <span class="badge">Franklin MagForce 3-phase on a SubDrive 30 VFD: shaft <b style="color:${flCol}">${S.BHP.toFixed(1)} HP</b> (${S.pctFL.toFixed(0)}% of the 3 HP rating — reserve torque), ~${S.amps.toFixed(1)} A single-phase into the drive.</span>`
+      : ` <span class="badge">Motor drawing <b style="color:${flCol}">${S.amps.toFixed(1)} A</b> (${S.pctFL.toFixed(0)}% of full load; Franklin 3HP 230V·1φ: 14.0 A FL / 17.0 A SF).</span>`;
   }
   document.getElementById('pumpnote').innerHTML=pn;
 
@@ -1137,7 +1281,14 @@ function updateText(){
   const drop = Math.max(0, S.Pcsvin - S.Pd);          // actual throttling drop (inlet − outlet)
   const droop = csvFalloff(S.Qpump);                  // CSV2W reduced-pressure fall-off
   let cn;
-  if(params.mode==='return') cn=`<span style="color:#ffc24b">Return line.</span> A relief valve recirculates the pump's excess flow back to the cistern, holding the system at the threshold. The pump never cycles, but it runs continuously at full flow — efficient on the motor, wasteful on energy (it pumps water it doesn't use). Contrast the low-flow CSV operating point on the pump curve.`;
+  if(drive()==='vfd'){
+    const reuse = params.scenario==='A';
+    cn=`<span style="color:var(--green)">${reuse?'Proposal A':'Proposal B'} — variable-speed drive.</span> The cycle-stop valve is removed; a Franklin SubDrive 30 Connect holds <b>${params.csv} psi</b> by varying motor speed (affinity: Q∝speed, H∝speed², power∝speed³). No throttling loss and no on/off cycling. `
+      + (reuse
+        ? `Reuses the existing <b>${pump().short}</b> pump end (its prior wear carries forward; JKA warranties the new motor only).`
+        : `New <b>${pump().short}</b> pump end — fresh start, no carried-over wear; full system warranty. The 1.5 HP end loads the 3 HP MagForce motor lightly, so it runs cool with reserve torque.`);
+  }
+  else if(params.mode==='return') cn=`<span style="color:#ffc24b">Return line.</span> A relief valve recirculates the pump's excess flow back to the cistern, holding the system at the threshold. The pump never cycles, but it runs continuously at full flow — efficient on the motor, wasteful on energy (it pumps water it doesn't use). Contrast the low-flow CSV operating point on the pump curve.`;
   else if(params.mode==='neither') cn='<span style="color:var(--muted)">No valve.</span> Without pressure regulation the pump can only cycle on/off via the 40/60 switch — watch the cycles/hr and the sawtooth on the pressure chart. A bigger tank is the only way to slow the cycling.';
   else if(!S.pumpOn) cn='Pump off — valve idle. Tank holds system pressure.';
   else if(S.regime==='overdrive') cn=`<span style="color:var(--red)">Overdrive:</span> demand exceeds pump capacity at ${params.csv} psi, so the valve is wide open and can no longer hold the setpoint — outlet dropped to ~${S.Pd.toFixed(0)} psi (follows the pump curve).`;
@@ -1222,10 +1373,22 @@ function selfTest(){
   if(pumpBHP(32) > fwBep) console.log('✓ FE (14-stage) loads the motor harder than F&W ('+pumpBHP(32).toFixed(2)+' > '+fwBep.toFixed(2)+' HP)');
   else console.log('✗ FE should load the motor harder than F&W');
   params.pump=pv;
+  // ---- VFD affinity laws (Proposals A & B) ----
+  const sc=params.scenario;
+  params.scenario='B';                         // 1.5HP Tri-Seal pump end
+  approx(pumpPsi(0), 98.0, 0.5, 'FPS 1.5HP shutoff ≈ 98 psi (226 ft)');
+  // affinity: half speed → quarter head at zero flow, and Q∝s along homologous points
+  approx(pumpPsiAt(0,0.5), 0.25*98.0, 0.2, 'affinity: half speed → ¼ shutoff head');
+  approx(pumpPsiAt(20,1)-pumpPsiAt(0,1), pumpPsiAt(20,1)-98.0, 0.01, 'full-speed curve self-consistent');
+  // affinity power: BHP at the same flow scales ~ with head (∝ s² at fixed Q) — drops at low speed
+  if(pumpBHPat(15,0.7) < pumpBHPat(15,1.0)) console.log('✓ VFD: lower speed → less shaft load at a given flow ('+pumpBHPat(15,0.7).toFixed(2)+' < '+pumpBHPat(15,1.0).toFixed(2)+' HP)');
+  else console.log('✗ VFD lower speed should reduce shaft load');
+  approx(driveInputAmps(3.0), 11.8, 0.5, 'drive input ≈ 11.8 A @ 3 HP shaft (1φ 230V, ~0.83 eff)');
+  params.scenario=sc;
 }
 
 //=================================================================
-resetSim(); enforceOrder(); selfTest();
+resetSim(); applyScenario(); enforceOrder(); selfTest();
 requestAnimationFrame(frame);
 </script>
 </body>
