@@ -196,7 +196,7 @@
         <input id="csv" type="range" min="25" max="75" value="50" step="1">
       </div>
 
-      <div class="row ctl">
+      <div class="row ctl" id="switchCtl">
         <div>
           <label>Cut-in <b id="vCin">40</b></label>
           <input id="cin" type="range" min="20" max="55" value="40" step="1">
@@ -479,9 +479,10 @@ function resetSim(){
 function step(dtMin){
   const A = params.N * params.K;
   const setp = params.csv, cin = params.cin, cout = params.cout;
+  const isVfd = drive()==='vfd';
   const Vtank = params.Vtank;
   const VairEmpty = Vtank;                       // bladder empty of water
-  const VairFull  = vairAtP(cout + 25);          // hard ceiling clamp
+  const VairFull  = vairAtP((isVfd?setp:cout) + 25);  // hard ceiling clamp
 
   if(!params.power){ S.pumpOn = false; }
 
@@ -652,8 +653,15 @@ function step(dtMin){
   // system below cut-out; set the relief above cut-out and the switch takes over.
   const wasOn = pumpOn;
   if(params.power){
-    if(Pd >= cout) pumpOn = false;
-    else if(Pd <= cin) pumpOn = true;
+    if(isVfd){
+      // SubDrive has no mechanical switch — it sleeps just above the setpoint when it
+      // can't slow below minimum (zero demand) and wakes a few psi below the setpoint.
+      if(Pd >= setp + 4) pumpOn = false;
+      else if(Pd <= setp - 3) pumpOn = true;
+    } else {
+      if(Pd >= cout) pumpOn = false;
+      else if(Pd <= cin) pumpOn = true;
+    }
   }
   // cycle tracking: log pump starts, derive cycles/hour from recent intervals
   if(pumpOn && !wasOn){ S.starts.push(S.t); if(S.starts.length>8) S.starts.shift(); }
@@ -899,7 +907,8 @@ function drawSchematic(){
   // system-pressure gauge above the tee
   drawGauge(g, X.tank, midY-152, 38, S.Pd, 80, 'psi', 'system P', pressColor(S.Pd));
 
-  // ---- pressure switch (taps the manifold, opens/closes the pump circuit) ----
+  // ---- pressure switch (fixed-speed only; a SubDrive VFD has no mechanical switch) ----
+  if(drive()!=='vfd'){
   const swx=X.tank+58, swy=midY-54, energized=S.pumpOn;
   g.strokeStyle='#3a557d'; g.lineWidth=2; g.setLineDash([3,3]);
   g.beginPath(); g.moveTo(X.tank+18,midY); g.lineTo(swx,midY-14); g.lineTo(swx,swy+16); g.stroke(); g.setLineDash([]);
@@ -916,6 +925,7 @@ function drawSchematic(){
   g.fillStyle=energized?'#3ddc84':'#ff5d6c'; g.font='11px Segoe UI';
   g.fillText(energized?'closed':'open', swx, swy+27);
   g.fillStyle='#9fb3cd'; g.fillText('in '+params.cin+' / out '+params.cout, swx, swy+38);
+  }
 
   // ---- booster pump (CJ103071, 50 ft up the line to the sprinklers) ----
   if(params.booster){
@@ -977,6 +987,8 @@ function drawSchematic(){
 }
 
 function pressColor(p){
+  if(drive()==='vfd')                              // VFD: judged against the setpoint, not a switch band
+    return Math.abs(p - params.csv) <= 6 ? '#3ddc84' : (Math.abs(p-params.csv)<=15?'#ffc24b':'#ff5d6c');
   if(p < params.cin-3) return '#ff5d6c';
   if(p > params.cout+3) return '#ff5d6c';
   return '#3ddc84';
@@ -1000,19 +1012,28 @@ const cx = ch.getContext('2d');
 function drawChart(){
   const g=cx, W=ch.width, H=ch.height, pad=30;
   g.clearRect(0,0,W,H);
-  const pMin=20, pMax=80;
+  const pMin=20, pMax=drive()==='vfd'&&params.csv>62 ? 90 : 80;
   const y = p => H-pad - (p-pMin)/(pMax-pMin)*(H-2*pad);
-  // band
-  g.fillStyle='rgba(61,220,132,0.10)';
-  g.fillRect(pad, y(params.cout), W-2*pad, y(params.cin)-y(params.cout));
-  // grid lines cut-in/out/csv
-  [['cut-out',params.cout,'#3ddc84'],['cut-in',params.cin,'#3ddc84'],['CSV',params.csv,'#7c5cff']]
-   .forEach(([lab,p,c])=>{
-    g.strokeStyle=c+'66'; g.lineWidth=1; g.setLineDash([4,4]);
-    g.beginPath(); g.moveTo(pad,y(p)); g.lineTo(W-pad,y(p)); g.stroke(); g.setLineDash([]);
-    g.fillStyle=c; g.font='12px Segoe UI'; g.textAlign='left';
-    g.fillText(lab+' '+p, W-pad+2-58, y(p)-3);
-  });
+  if(drive()==='vfd'){
+    // VFD: a SubDrive has no 40/60 switch — show the setpoint and the narrow sleep/wake band
+    g.fillStyle='rgba(61,220,132,0.10)';
+    g.fillRect(pad, y(params.csv+4), W-2*pad, y(params.csv-3)-y(params.csv+4));
+    g.strokeStyle='#3ddc8466'; g.lineWidth=1; g.setLineDash([4,4]);
+    g.beginPath(); g.moveTo(pad,y(params.csv)); g.lineTo(W-pad,y(params.csv)); g.stroke(); g.setLineDash([]);
+    g.fillStyle='#3ddc84'; g.font='12px Segoe UI'; g.textAlign='left';
+    g.fillText('set '+params.csv, W-pad+2-58, y(params.csv)-3);
+  } else {
+    // 40/60 switch band + cut-in/out/CSV grid lines
+    g.fillStyle='rgba(61,220,132,0.10)';
+    g.fillRect(pad, y(params.cout), W-2*pad, y(params.cin)-y(params.cout));
+    [['cut-out',params.cout,'#3ddc84'],['cut-in',params.cin,'#3ddc84'],['CSV',params.csv,'#7c5cff']]
+     .forEach(([lab,p,c])=>{
+      g.strokeStyle=c+'66'; g.lineWidth=1; g.setLineDash([4,4]);
+      g.beginPath(); g.moveTo(pad,y(p)); g.lineTo(W-pad,y(p)); g.stroke(); g.setLineDash([]);
+      g.fillStyle=c; g.font='12px Segoe UI'; g.textAlign='left';
+      g.fillText(lab+' '+p, W-pad+2-58, y(p)-3);
+    });
+  }
   const h=S.hist; if(h.length<2){ axisLabels(g,H,pad,pMin,pMax,y); return; }
   const t0=h[0].t, t1=h[h.length-1].t, span=Math.max(t1-t0,0.001);
   const xx = t => pad + (t-t0)/span*(W-2*pad);
@@ -1205,7 +1226,11 @@ function applyScenario(){
   // VFD scenarios remove the CSV / return / neither choice — the drive controls pressure
   const modeCtl=document.getElementById('modeCtl'), modeSel=document.getElementById('mode');
   modeCtl.style.opacity = vfd ? 0.45 : 1; modeSel.disabled = vfd;
-  if(vfd){ params.cin=40; params.cout=60;
+  // A SubDrive has NO mechanical pressure switch — hide/disable the cut-in/cut-out band
+  const swCtl=document.getElementById('switchCtl');
+  swCtl.style.opacity = vfd ? 0.4 : 1;
+  document.getElementById('cin').disabled = vfd; document.getElementById('cout').disabled = vfd;
+  if(vfd){ params.cin=40; params.cout=60;          // keep a sane precharge basis (cin-2)
     document.getElementById('cin').value=40; document.getElementById('cout').value=60; }
   document.getElementById('setpointLbl').textContent =
     vfd ? 'SubDrive set pressure' : (params.mode==='return'?'Return/relief pressure':'CSV2W set pressure');
@@ -1245,7 +1270,9 @@ function enforceOrder(){
   if(params.cout <= params.cin){ params.cout = params.cin+1; coutE.value=params.cout; }
   // ONLY the CSV requires the setpoint to sit inside the band — clamp the SETPOINT,
   // never move the switch. The return-line relief pressure is independent of the switch.
-  if(params.mode==='csv' || drive()==='vfd'){
+  // The CSV2W setpoint must sit inside the 40/60 switch band; the VFD has no switch,
+  // so its setpoint is free across the full slider range (the drive holds it electronically).
+  if(params.mode==='csv' && drive()!=='vfd'){
     params.csv = clamp(params.csv, params.cin+1, params.cout-1);
     csvE.value = params.csv;
   }
@@ -1254,7 +1281,7 @@ function enforceOrder(){
   document.getElementById('vCsv').textContent=params.csv;
   const note=document.getElementById('ordering');
   if(drive()==='vfd')
-    note.innerHTML = `SubDrive holds <b>${params.csv}</b> psi by varying speed; sleeps near cut-out <b>${params.cout}</b>, wakes at cut-in <b>${params.cin}</b> · precharge <b>${params.cin-2}</b> psi`;
+    note.innerHTML = `SubDrive holds <b>${params.csv}</b> psi electronically by varying motor speed — <b>no pressure switch</b>; it sleeps just above ${params.csv} psi at zero demand and wakes a few psi below · tank precharge <b>${params.cin-2}</b> psi`;
   else if(params.mode==='csv')
     note.innerHTML = `CSV2W set to <b>${params.csv}</b> psi, between cut-in <b>${params.cin}</b> and cut-out <b>${params.cout}</b> · tank precharge <b>${params.cin-2}</b> psi`;
   else if(params.mode==='return')
@@ -1268,6 +1295,10 @@ function enforceOrder(){
 function updateText(){
   const cyc = S.cyclesPerHr;
   const cycCol = cyc>30?'var(--red)':cyc>10?'var(--amber)':'var(--green)';
+  document.getElementById('chartlegend').textContent =
+    drive()==='vfd' ? `SubDrive holds ${params.csv} psi · ● running`
+    : params.mode==='return' ? `relief ${params.csv} psi · ● pump on`
+    : `band ${params.cin}–${params.cout} psi · ● pump on`;
   const sb=document.getElementById('statebar');
   const ampCol = S.pctFL>115?'var(--red)':S.pctFL>100?'var(--amber)':'var(--green)';
   const coolCol = !S.pumpOn?'var(--muted)':(S.coolOK?'var(--green)':'var(--red)');
