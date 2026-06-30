@@ -43,7 +43,7 @@
   header{padding:18px 24px 6px; text-align:center}
   header h1{margin:0; font-size:22px; letter-spacing:.3px}
   header p{margin:4px 0 0; color:var(--muted); font-size:13px}
-  .wrap{max-width:1180px; margin:0 auto; padding:10px 16px 40px}
+  .wrap{max-width:1320px; margin:0 auto; padding:10px 16px 40px}
   .card{background:linear-gradient(180deg,var(--panel),#13233a);
     border:1px solid #25406640; border-radius:16px; padding:14px;
     box-shadow:0 10px 30px #00040a55; margin-top:14px}
@@ -82,7 +82,7 @@
   .badge{font-size:12px;color:var(--muted)}
   .badge a, .note a, .srclinks a{color:var(--water); text-decoration:none; border-bottom:1px dotted #3a6ea5}
   .badge a:hover, .note a:hover, .srclinks a:hover{color:#9fdcff}
-  .srclinks{max-width:1180px; margin:14px auto 0; padding:0 16px; font-size:12px; color:var(--muted); line-height:1.7}
+  .srclinks{max-width:1320px; margin:14px auto 0; padding:0 16px; font-size:12px; color:var(--muted); line-height:1.7}
   .note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
   .warn{color:var(--amber)}
   button.reset{width:100%; padding:10px; border-radius:10px; cursor:pointer;
@@ -101,7 +101,7 @@
 
 <div class="wrap">
   <div class="card">
-    <canvas id="schematic" width="1140" height="462"></canvas>
+    <canvas id="schematic" width="1300" height="462"></canvas>
   </div>
 
   <div class="grid">
@@ -182,7 +182,12 @@
         </select>
       </div>
       <div class="ctl">
-        <label>Sprinkler elevation <b id="vElev">0 ft</b></label>
+        <div class="switch" id="boosterSw">
+          <div class="dot"></div><div>Booster pump (CJ103071) · +50 ft</div>
+        </div>
+      </div>
+      <div class="ctl">
+        <label><span id="elevLbl">Sprinkler elevation</span> <b id="vElev">0 ft</b></label>
         <input id="elev" type="range" min="-100" max="100" value="0" step="5">
       </div>
 
@@ -239,6 +244,8 @@
     Pumps —
     <a href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW1674-FW-4-in-Sub-Catalog.pdf" target="_blank" rel="noopener">Flint &amp; Walling 4&quot; submersible catalog (4F35S30 curves)</a>,
     <a href="https://franklinwater.com/" target="_blank" rel="noopener">Franklin Electric 4&quot; High-Capacity (35JS3S4, J-Class curves)</a>.
+    Booster —
+    <a href="https://flintandwalling.com/wp-content/uploads/sites/2/2024/02/FW0074-CJ101_103-catalog.pdf" target="_blank" rel="noopener">F&amp;W CJ101/CJ103 centrifugal catalog (CJ103071 curve)</a>.
     Motor &amp; cooling —
     <a href="https://www.franklinwater.com/resources/franklin-aim" target="_blank" rel="noopener">Franklin AIM Manual (motor specs Table 13; cooling flow Table 6 — flow sleeve required in open water)</a>.
     Cycle Stop Valve —
@@ -393,17 +400,36 @@ function pumpFlowAtPressure(P){ return pumpFlowAtPressureSpeed(P, 1); }
 // Ideal sprinkler zone demand at a given head pressure: Q = N*K*sqrt(P)
 function sprinklerDemand(A, P){ return A * Math.sqrt(Math.max(P,0)); }
 
+// Optional in-line booster pump (Flint & Walling CJ103071, 3/4 HP single-stage).
+// Curve fit to the F&W CJ103 catalog: shutoff 32 psi; ~71 gpm@10, 61@20, 19@30.
+// Mounted BOOST_ELEV ft above the tank; the sprinklers sit params.elev ft above it.
+const BOOST_ELEV = 50;            // ft from pressure tank up to the booster pump
+const BOOST_H0 = 32.0;            // CJ103071 shutoff boost (psi)
+const BOOST_K = 0.0040;           // boost droop coefficient (psi/gpm^2)
+const BOOST_RISER_KF = 0.010;     // friction in the 50 ft riser to the booster (psi/gpm^2)
+const BOOST_HP = 0.75, BOOST_AMPS = 7.0;   // 3/4 HP, ~7 A @ 230 V (nameplate)
+function boosterBoost(Q){ return Math.max(0, BOOST_H0 - BOOST_K*Q*Q); }
+
 // Actual zone demand from the SYSTEM (tank) pressure, accounting for sprinkler
 // elevation (static head) and lateral pipe friction between tank and heads.
 //   P_head = P_tank - elevation_head - lateral_friction(Q),   Q = A*sqrt(P_head)
-// Substituting gives Q² = A²(avail - KF_LAT·Q²), which solves in closed form
-// (robust under heavy over-demand, where fixed-point iteration would oscillate).
+// Substituting gives Q² = A²(avail - K·Q²), which solves in closed form (robust under
+// heavy over-demand, where fixed-point iteration would oscillate). With the booster the
+// chain becomes  P_head = P_tank - (50+elev)·ft + (Hb0 - Kb·Q²) - (Kriser+Klat)·Q² —
+// still quadratic in Q, so the SAME closed form holds with an enlarged C and K.
 // Returns {Q: zone gpm, Phead: pressure actually at the heads}.
 function solveDemand(A, Ptank){
-  const avail = Ptank - elevPsi();              // pressure left after lifting to heads
-  if(A<=0 || avail<=0) return { Q:0, Phead:Math.max(0,avail) };
-  const Q = A*Math.sqrt(avail / (1 + A*A*KF_LAT));
-  const Phead = Math.max(0, avail - KF_LAT*Q*Q);
+  let C, K;
+  if(params.booster){
+    C = Ptank - (BOOST_ELEV + params.elev)*PSI_PER_FT + BOOST_H0;
+    K = KF_LAT + BOOST_RISER_KF + BOOST_K;
+  } else {
+    C = Ptank - params.elev*PSI_PER_FT;
+    K = KF_LAT;
+  }
+  if(A<=0 || C<=0) return { Q:0, Phead:Math.max(0,C) };
+  const Q = A*Math.sqrt(C / (1 + A*A*K));
+  const Phead = Math.max(0, C - K*Q*Q);
   return { Q, Phead };
 }
 function elevPsi(){ return params.elev * PSI_PER_FT; }   // +ft above pump => +psi to lift
@@ -429,7 +455,8 @@ const params = {
   power:true, mode:'csv', elev:0,  // mode: 'csv' | 'return' | 'neither';  elev ft, + above pump
   sleeve:4,                         // motor flow-sleeve / casing ID (in); 0 = none (open cistern)
   pump:'fw',                        // 'fw' = Flint & Walling 4F35S30 | 'fe' = Franklin 35JS3S4
-  scenario:'existing'               // 'existing' = CSV2W + fixed speed | 'A' = VFD reuse pump | 'B' = VFD + new 1.5HP
+  scenario:'existing',              // 'existing' = CSV2W + fixed speed | 'A' = VFD reuse pump | 'B' = VFD + new 1.5HP
+  booster:false                     // CJ103071 booster pump 50 ft above the tank
 };
 let S = null;
 function precharge(){ return params.cin - 2; }
@@ -443,6 +470,7 @@ function resetSim(){
     pumpOn: params.power, Pd: startP, Vair: vairAtP(startP),
     Qpump:0, Qdem:0, Qnet:0, Qreturn:0, regime:"—", t:0,
     Ppump:0, Pcsvin:0, Phead:startP, throttle:0, BHP:0, speed:1, amps:0, pctFL:0,
+    boostIn:0, boost:0, boostOut:0, boostPrime:true,
     starts:[], cyclesPerHr:0, hist:[]   // hist: {t, Pd, on}
   };
 }
@@ -645,6 +673,14 @@ function step(dtMin){
   S.Pd=Pd; S.Vair=Vair; S.pumpOn=pumpOn;
   S.Qpump=Qpump; S.Qdem=dem.Q; S.Qnet=Qpump-dem.Q; S.Qreturn=Qreturn; S.regime=regime;
   S.Ppump=Ppump; S.Pcsvin=Pcsvin; S.Phead=dem.Phead;
+  // booster pump (CJ103071) readouts — inlet (after the 50 ft lift), boost, outlet
+  if(params.booster){
+    const q = dem.Q;
+    S.boostIn  = Math.max(0, Pd - BOOST_ELEV*PSI_PER_FT - BOOST_RISER_KF*q*q); // psi at booster suction
+    S.boost    = boosterBoost(q);                                              // psi added by the booster
+    S.boostOut = S.boostIn + S.boost;                                          // psi leaving the booster
+    S.boostPrime = (Pd - BOOST_ELEV*PSI_PER_FT - BOOST_RISER_KF*q*q) > 0.5;     // suction stays positive?
+  } else { S.boostIn=0; S.boost=0; S.boostOut=0; S.boostPrime=true; }
   S.throttle=throttle; S.BHP=pumpOn?pumpBHPat(Qpump, speed):0; S.Pnat=Pnat;
   S.speed = pumpOn ? speed : 0;                   // VFD pump speed fraction
   // motor loading & current — fixed-speed: 1φ line amps; VFD: 1φ input amps to the drive
@@ -714,8 +750,12 @@ function drawSchematic(){
   g.clearRect(0,0,W,H);
   const midY = 250;
 
-  // node x positions — pump sits at the BOTTOM of the cistern; an 8 ft riser lifts water out
-  const X = {cist:135, pump:135, csv:470, tank:700, spr:960};
+  // node x positions — spread evenly across the wider canvas; booster-aware so the run
+  // to the sprinklers isn't cramped (with booster) or over-long (without). Pump sits at
+  // the bottom of the cistern; an 8 ft riser lifts water out.
+  const X = params.booster
+    ? {cist:120, pump:120, csv:390, tank:660, booster:925, spr:1185}
+    : {cist:175, pump:175, csv:470, tank:765, booster:1010, spr:1095};
   const pumpY = midY+92, cTop = midY-70, cBot = midY+138, wsurf = midY;
 
   // ---- cistern (well) — drawn first so the riser & pump sit on top ----
@@ -877,6 +917,28 @@ function drawSchematic(){
   g.fillText(energized?'closed':'open', swx, swy+27);
   g.fillStyle='#9fb3cd'; g.fillText('in '+params.cin+' / out '+params.cout, swx, swy+38);
 
+  // ---- booster pump (CJ103071, 50 ft up the line to the sprinklers) ----
+  if(params.booster){
+    const Xb=X.booster, on=S.pumpOn && S.Qdem>0.05;
+    const bcol = !S.pumpOn ? '#5a6e8c' : (S.boostPrime ? '#39b7ff' : '#ff5d6c');
+    // booster body on the supply line
+    g.fillStyle='#15273e'; circle(g, Xb, midY, 22); g.fill();
+    g.lineWidth=3; g.strokeStyle=bcol; circle(g, Xb, midY, 22); g.stroke();
+    g.save(); g.translate(Xb,midY); g.rotate(flowPhase*(on?S.Qdem*0.05+0.3:0));
+    g.strokeStyle=bcol; g.lineWidth=2.5;
+    for(let i=0;i<4;i++){ g.rotate(Math.PI/2); g.beginPath(); g.moveTo(0,0); g.quadraticCurveTo(10,3,15,0); g.stroke(); }
+    g.restore();
+    g.textAlign='center';
+    g.fillStyle='#cfe0f7'; g.font='600 13px Segoe UI'; g.fillText('BOOSTER', Xb, midY-44);
+    g.fillStyle='#9fb3cd'; g.font='11px Segoe UI'; g.fillText('CJ103071 ¾ HP · +50 ft', Xb, midY-31);
+    // INLET pressure — prominent
+    g.fillStyle = S.boostPrime ? '#ffc24b' : '#ff5d6c'; g.font='600 14px Segoe UI';
+    g.fillText('inlet '+S.boostIn.toFixed(0)+' psi', Xb, midY+39);
+    g.fillStyle='#7ee0a4'; g.font='11px Segoe UI';
+    g.fillText('+'+S.boost.toFixed(0)+' psi → '+S.boostOut.toFixed(0)+' out', Xb, midY+53);
+    if(!S.boostPrime){ g.fillStyle='#ff5d6c'; g.font='600 11px Segoe UI'; g.fillText('⚠ suction lost prime', Xb, midY+67); }
+  }
+
   // ---- sprinklers ----
   g.fillStyle='#15273e'; roundRect(g, X.spr-44, midY-6, 88, 14, 6); g.fill();  // manifold
   const heads = Math.max(1, params.N);
@@ -903,9 +965,13 @@ function drawSchematic(){
   g.fillText('SPRINKLERS', X.spr, midY+30);
   g.fillStyle='#9fb3cd'; g.font='13px Segoe UI';
   g.fillText(params.N+' heads', X.spr, midY+46);
-  const elevLbl = params.elev===0 ? 'at pump level' : (params.elev>0?'+'+params.elev+' ft above':params.elev+' ft below');
-  g.fillStyle = params.elev===0?'#9fb3cd':(params.elev>0?'#ffd281':'#7ee0a4');
+  const elevLbl = params.booster
+    ? (params.elev>=0?'+'+params.elev:''+params.elev)+' ft above booster'
+    : (params.elev===0 ? 'at pump level' : (params.elev>0?'+'+params.elev+' ft above':params.elev+' ft below'));
+  g.fillStyle = params.booster?'#ffd281':(params.elev===0?'#9fb3cd':(params.elev>0?'#ffd281':'#7ee0a4'));
   g.fillText(elevLbl, X.spr, midY+62);
+  if(params.booster){ g.fillStyle='#9fb3cd'; g.font='11px Segoe UI';
+    g.fillText('('+(BOOST_ELEV+params.elev)+' ft total above pump)', X.spr, midY+76); }
   drawGauge(g, X.spr-37, midY-152, 32, S.Phead, 80, 'psi', 'head P', headColor(S.Phead));
   drawGauge(g, X.spr+37, midY-152, 32, S.Qdem, 50, 'gpm', 'zone Q', '#39b7ff');
 }
@@ -1152,6 +1218,11 @@ bind('elev', e=>{ params.elev=+e.value;
 document.getElementById('pumpPower').addEventListener('click', function(){
   params.power=!params.power; this.classList.toggle('on',params.power);
 });
+document.getElementById('boosterSw').addEventListener('click', function(){
+  params.booster=!params.booster; this.classList.toggle('on',params.booster);
+  document.getElementById('elevLbl').textContent =
+    params.booster ? 'Sprinkler elev. above booster' : 'Sprinkler elevation';
+});
 bind('mode', e=>{
   params.mode=e.value;
   // the setpoint slider means different things per mode
@@ -1211,6 +1282,7 @@ function updateText(){
     `<span>pump Q <b>${S.Qpump.toFixed(1)}</b> gpm</span>`+
     (params.mode==='return' && !vfd ? `<span>return Q <b style="color:var(--amber)">${S.Qreturn.toFixed(1)}</b> gpm</span>` : '')+
     `<span>system P <b>${S.Pd.toFixed(1)}</b> psi</span>`+
+    (params.booster ? `<span>booster in <b style="color:${S.boostPrime?'var(--amber)':'var(--red)'}">${S.boostIn.toFixed(0)}</b> psi → out <b>${S.boostOut.toFixed(0)}</b></span>` : '')+
     `<span>head P <b>${S.Phead.toFixed(1)}</b> psi</span>`+
     `<span>zone Q <b>${S.Qdem.toFixed(1)}</b> gpm</span>`+
     `<span>tank <b>${(params.Vtank-S.Vair).toFixed(1)}</b> gal</span>`+
@@ -1252,8 +1324,15 @@ function updateText(){
   else if(S.regime==='overdrive') msg=`Demand exceeds what the pump can deliver at ${params.csv} psi. CSV is wide open, can't regulate — system pressure falls to ~${S.Pd.toFixed(0)} psi and the pump runs flat out. Reduce heads to restore regulation.`;
   else if(S.regime==='pump off') msg=`Pump off. Tank drawdown supplies demand; pressure falls toward cut-in (${params.cin} psi), where the pump restarts.`;
   else if(S.regime==='tank empty') msg=`Tank empty and no pump inflow — pressure and flow have collapsed to zero.`;
-  // elevation footnote
-  if(params.elev!==0 && S.pumpOn) msg += ` <span class="badge">Heads ${params.elev>0?'+'+params.elev+' ft above':(-params.elev)+' ft below'} pump → ${Math.abs(params.elev*PSI_PER_FT).toFixed(0)} psi ${params.elev>0?'lost lifting to':'gained dropping to'} the heads.</span>`;
+  // booster footnote
+  if(params.booster && S.pumpOn){
+    const prime = S.boostPrime
+      ? `Inlet <b>${S.boostIn.toFixed(0)} psi</b> (tank ${S.Pd.toFixed(0)} − ${(BOOST_ELEV*PSI_PER_FT).toFixed(0)} psi for the 50 ft lift), boosts <b>+${S.boost.toFixed(0)} psi</b> → <b>${S.boostOut.toFixed(0)} psi</b> out, leaving <b>${S.Phead.toFixed(0)} psi</b> at the heads ${params.elev>=0?'+'+params.elev:params.elev} ft up.`
+      : `<span style="color:var(--red)">⚠ Booster suction has lost prime — the tank pressure can’t lift water the 50 ft to the inlet. Raise the set pressure.</span>`;
+    msg += ` <span class="badge"><b>CJ103071 booster:</b> ${prime}</span>`;
+  }
+  // elevation footnote (without booster, elevation is relative to the pump)
+  else if(params.elev!==0 && S.pumpOn) msg += ` <span class="badge">Heads ${params.elev>0?'+'+params.elev+' ft above':(-params.elev)+' ft below'} pump → ${Math.abs(params.elev*PSI_PER_FT).toFixed(0)} psi ${params.elev>0?'lost lifting to':'gained dropping to'} the heads.</span>`;
   document.getElementById('explain').innerHTML=msg;
 
   // pump-curve note
@@ -1402,6 +1481,16 @@ function selfTest(){
   else console.log('✗ VFD lower speed should reduce shaft load');
   approx(driveInputAmps(3.0), 11.8, 0.5, 'drive input ≈ 11.8 A @ 3 HP shaft (1φ 230V, ~0.83 eff)');
   params.scenario=sc;
+  // ---- CJ103071 booster pump ----
+  approx(boosterBoost(0), 32.0, 0.1, 'CJ103071 shutoff boost ≈ 32 psi');
+  approx(boosterBoost(30), 32-0.004*900, 0.1, 'CJ103071 boost @30 gpm ≈ 28 psi');
+  const bk=params.booster, be=params.elev;
+  params.booster=true; params.elev=0;
+  const d=solveDemand(1.74, 50);              // 6 PGP heads, 50 psi tank, heads 50 ft up
+  approx(d.Q, 1.74*Math.sqrt(d.Phead), 0.01, 'booster demand self-consistent (Q=A√Phead)');
+  if(d.Phead > 50) console.log('✓ booster lifts head pressure above the tank even 50 ft up ('+d.Phead.toFixed(0)+' psi)');
+  else console.log('✗ booster should raise head pressure above static-lift-only');
+  params.booster=bk; params.elev=be;
 }
 
 //=================================================================
