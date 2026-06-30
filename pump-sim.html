@@ -1279,16 +1279,19 @@ function updateText(){
   }
   document.getElementById('pumpnote').innerHTML=pn;
 
-  // motor-cooling note — same Franklin 4" motor for both pumps, so the requirement is shared.
-  const aim=`<a href="${COOL_DOC}" target="_blank" rel="noopener">Franklin AIM Table 6</a>`;
+  // motor-cooling note — requirement is motor-defined (4" Franklin), shared across scenarios.
+  // Existing = 224302 single-phase; Proposals A/B = MagForce 3-phase on the VFD. Both are
+  // 4" Franklin submersible motors, so Franklin's 0.25 ft/s cooling-flow rule applies to all.
+  const aim=`<a href="${COOL_DOC}" target="_blank" rel="noopener">Franklin AIM Manual (Table 6)</a>`;
+  const motorName = vfd ? 'Franklin MagForce 4″ 3-phase motor' : 'Franklin 4″ 3 HP motor';
   let cool;
   if(!S.pumpOn) cool='';
   else if(params.sleeve<=0)
-    cool=`<span style="color:var(--red)">⚠ No flow sleeve.</span> The Franklin 4″ motor sits in an open cistern — ${aim} states a flow inducer sleeve <b>“is always required in an open body of water”</b> so pumped flow is forced past the motor. Add a sleeve to ensure ≥ 0.25 ft/s.`;
+    cool=`<span style="color:var(--red)">⚠ No flow sleeve.</span> The ${motorName} sits in an open cistern — ${aim} states a flow inducer sleeve <b>“is always required in an open body of water.”</b> ${vfd?'That holds for the MagForce too: high efficiency lowers the heat, but the open-water rule is geometric — there is no defined flow path past the motor regardless of motor type.':'Pumped flow must be forced past the motor.'} Add a sleeve to ensure ≥ 0.25 ft/s.`;
   else if(S.coolOK)
-    cool=`<span style="color:var(--green)">Cooling OK:</span> ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ sleeve (${aim} needs ≥ 0.25 ft/s ⇒ ≥ ${S.coolMinQ.toFixed(0)} gpm for a 4″ motor ≥ 3 HP). Same motor on both pumps.`;
+    cool=`<span style="color:var(--green)">Cooling OK:</span> ${S.coolVel.toFixed(2)} ft/s past the ${motorName} in the ${params.sleeve}″ sleeve (${aim} needs ≥ 0.25 ft/s ⇒ ≥ ${S.coolMinQ.toFixed(0)} gpm for a 4″ motor ≥ 3 HP).${vfd?' The MagForce makes less heat but is held to the same flow rule.':' Same requirement on both pumps.'}`;
   else
-    cool=`<span style="color:var(--red)">⚠ Insufficient cooling:</span> only ${S.coolVel.toFixed(2)} ft/s past the motor in the ${params.sleeve}″ casing — below the 0.25 ft/s minimum (${aim} requires ≥ ${S.coolMinQ.toFixed(0)} gpm at this casing size). At ${S.Qpump.toFixed(1)} gpm the motor can overheat; use a snug flow sleeve so low-flow (CSV-throttled) running still cools it.`;
+    cool=`<span style="color:var(--red)">⚠ Insufficient cooling:</span> only ${S.coolVel.toFixed(2)} ft/s past the ${motorName} in the ${params.sleeve}″ casing — below the 0.25 ft/s minimum (${aim} requires ≥ ${S.coolMinQ.toFixed(0)} gpm here). ${vfd?'At reduced VFD speed the flow past the motor is lower, so the sleeve matters <b>more</b> at low demand, not less.':`At ${S.Qpump.toFixed(1)} gpm the motor can overheat; use a snug flow sleeve so low-flow (CSV-throttled) running still cools it.`}`;
   document.getElementById('coolnote').innerHTML=cool;
 
   // valve note
