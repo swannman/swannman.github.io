@@ -127,7 +127,7 @@
         <div class="note" id="coolnote"></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="csvCard">
         <div class="chead">
           <h3>Cycle-stop valve characteristic</h3>
           <span class="badge"><a href="https://cyclestopvalves.com/pages/csv1a-csv2w1-25-general-information" target="_blank" rel="noopener">CSV2W specs ↗</a> · inlet vs outlet</span>
@@ -1270,7 +1270,14 @@ function applyScenario(){
     document.getElementById('cin').value=40; document.getElementById('cout').value=60; }
   document.getElementById('setpointLbl').textContent =
     vfd ? 'SubDrive set pressure' : (params.mode==='return'?'Return/relief pressure':'CSV2W set pressure');
-  refreshPumpUI(); enforceOrder();
+  refreshPumpUI(); enforceOrder(); updateCsvPanel();
+}
+// The cycle-stop-valve characteristic panel is only meaningful when a CSV is actually
+// in the system: fixed-speed scenario AND System type = Cycle Stop Valve. VFD proposals
+// (SubDrive) and the return/conventional modes have no CSV, so hide the panel entirely.
+function updateCsvPanel(){
+  const show = params.mode==='csv' && drive()!=='vfd';
+  document.getElementById('csvCard').style.display = show ? '' : 'none';
 }
 bind('sleeve', e=>{ params.sleeve=+e.value; });
 bind('speed', e=>{ params.speed=+e.value; document.getElementById('vSpeed').textContent=e.value; });
@@ -1295,7 +1302,7 @@ bind('mode', e=>{
     params.cin=40; params.cout=60;
     document.getElementById('cin').value=40; document.getElementById('cout').value=60;
   }
-  enforceOrder();
+  enforceOrder(); updateCsvPanel();
   S.starts=[]; S.cyclesPerHr=0;   // reset cycle stats on mode change
 });
 document.getElementById('reset').addEventListener('click', resetSim);
