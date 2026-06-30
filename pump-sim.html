@@ -57,8 +57,7 @@
   @media(max-width:900px){.grid,.grid2{grid-template-columns:1fr}}
   .chead{display:flex; justify-content:space-between; align-items:baseline; margin-bottom:8px}
   .chead h3{margin:0; color:var(--muted); text-transform:uppercase; letter-spacing:1px; font-size:13px}
-  .controls h3{margin:2px 0 12px; font-size:14px; color:var(--muted);
-    text-transform:uppercase; letter-spacing:1px}
+  .controls{margin-top:14px}   /* ungrouped: no card background, aligns with left column */
   .ctl{margin-bottom:14px}
   .ctl label{display:flex; justify-content:space-between; font-size:13px;
     margin-bottom:6px; color:var(--ink)}
@@ -141,9 +140,7 @@
       </div>
     </div>
 
-    <div class="card controls">
-      <h3>Controls</h3>
-
+    <div class="controls">
       <div class="ctl">
         <label>Scenario / proposal</label>
         <select id="scenario">
