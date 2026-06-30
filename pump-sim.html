@@ -15,6 +15,10 @@
             FE  Franklin Electric 35JS3S4 — 14-stage; shutoff 396ft/171.7psi; H=171.7-0.05811Q^2;
                 operating 15-45 GPM, best-eff 20-40, BEP ~32. Franklin J-Class 4" Hi-Cap
                 catalog (35 gpm performance). Stronger head => loads the motor near its SF.
+    PROPB Proposal B uses the Franklin SubDrive QuickPAK 35PMQP-3.0HP-3RC (SD30 drive +
+          35GPM/1.5HP pump end + 3HP MagForce motor). Max-speed H(Q)=173.4-0.03586Q^2 psi
+          fit to the QuickPAK datasheet depth-to-capacity table + shut-off PSI row
+          (shutoff 401ft/173.4psi; 121 pts, ~3ft rms). franklinwater.com SubDrive QuickPAK.
     MOTOR Franklin Electric 3HP/230V/1ph 3-wire (224302) — SHARED by both pumps.
           AIM Table 13: full load 14.0A/2940W, service factor (1.15) 17.0A/3350W.
     COOL  Franklin AIM Table 6: 4" motor >=3HP needs >=0.25 ft/s past the motor; flow
@@ -146,7 +150,7 @@
         <select id="scenario">
           <option value="existing" selected>Existing — CSV2W + fixed-speed motor</option>
           <option value="A">Proposal A — VFD, reuse existing F&amp;W pump</option>
-          <option value="B">Proposal B — VFD + new 1.5 HP Tri-Seal pump</option>
+          <option value="B">Proposal B — SubDrive QuickPAK 35PMQP (new 35 GPM end)</option>
         </select>
       </div>
       <div class="ctl" id="pumpCtl">
@@ -313,15 +317,17 @@ const PUMPS = {
         url:'https://franklinwater.com/',
         eff:[[5,20],[10,36],[15,46],[20,53],[25,58],[30,60.5],[32,61],[35,60],[40,55],[45,46],[50,36],[55,24]],
         bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:180 } },
-  // Proposal B pump end: Franklin FPS Tri-Seal 35 GPM, 1.5 HP high-capacity (7-stage).
-  // Curve fit to Franklin's published 35 GPM 1.5 HP performance (shutoff 226 ft/98 psi,
-  // <2 psi rms over 48 pts). Right-sized for a constant-pressure system; on a 3 HP
-  // MagForce motor it loads only ~1.2-1.5 HP, leaving reserve torque (runs cooler).
-  fps15: { name:'Franklin FPS Tri-Seal 35GPM 1.5HP', short:'FPS 35GPM 1.5HP', stages:7,
-        H0:98.0, k:0.03568, churn:0.7, ratedHP:1.5,
+  // Proposal B pump end: Franklin SubDrive QuickPAK 35PMQP-3.0HP-3RC (SD30 drive,
+  // 35 GPM / 1.5 HP nameplate pump end, 3 HP MagForce high-eff motor). The MAX-SPEED
+  // H-Q curve P(Q)=H0-k*Q^2 is fit to the datasheet's depth-to-capacity table + shut-off
+  // PSI row (121 pts, rms ~3 ft): shutoff 401 ft/173.4 psi; H=173.4-0.03586*Q^2 psi.
+  // Driven by the 3 HP MagForce, the SD30 modulates speed below this ceiling to hold
+  // pressure (amp-limited), so at irrigation demand it runs at part speed, cool, with reserve.
+  fps15: { name:'Franklin 35PMQP-3.0HP-3RC SubDrive QuickPAK', short:'35PMQP 35GPM', stages:7,
+        H0:173.4, k:0.03586, churn:1.2, ratedHP:1.5,
         url:'https://franklinwater.com/',
         eff:[[5,20],[10,36],[15,46],[20,53],[25,58],[30,60.5],[32,61],[35,60],[40,55],[45,46],[50,36],[55,24]],
-        bands:{ minCont:15, porLo:20, bep:32, porHi:40, runout:45, axisMax:55, pMax:110 } }
+        bands:{ minCont:15, porLo:25, bep:35, porHi:45, runout:55, axisMax:72, pMax:185 } }
 };
 // Active pump end depends on scenario: Proposal A reuses the existing F&W 4F35S30,
 // Proposal B uses the new 1.5HP Tri-Seal; the Existing baseline uses the selector.
@@ -1564,11 +1570,12 @@ function selfTest(){
   params.pump=pv;
   // ---- VFD affinity laws (Proposals A & B) ----
   const sc=params.scenario;
-  params.scenario='B';                         // 1.5HP Tri-Seal pump end
-  approx(pumpPsi(0), 98.0, 0.5, 'FPS 1.5HP shutoff ≈ 98 psi (226 ft)');
+  params.scenario='B';                         // 35PMQP SubDrive QuickPAK pump end
+  approx(pumpPsi(0), 173.4, 0.5, '35PMQP max-speed shutoff ≈ 173.4 psi (401 ft, datasheet)');
+  approx(pumpPsi(35)/PSI_PER_FT, 299, 12, '35PMQP 35gpm ≈ 299 ft (datasheet table)');
   // affinity: half speed → quarter head at zero flow, and Q∝s along homologous points
-  approx(pumpPsiAt(0,0.5), 0.25*98.0, 0.2, 'affinity: half speed → ¼ shutoff head');
-  approx(pumpPsiAt(20,1)-pumpPsiAt(0,1), pumpPsiAt(20,1)-98.0, 0.01, 'full-speed curve self-consistent');
+  approx(pumpPsiAt(0,0.5), 0.25*173.4, 0.2, 'affinity: half speed → ¼ shutoff head');
+  approx(pumpPsiAt(20,1)-pumpPsiAt(0,1), pumpPsiAt(20,1)-173.4, 0.01, 'full-speed curve self-consistent');
   // affinity power: BHP at the same flow scales ~ with head (∝ s² at fixed Q) — drops at low speed
   if(pumpBHPat(15,0.7) < pumpBHPat(15,1.0)) console.log('✓ VFD: lower speed → less shaft load at a given flow ('+pumpBHPat(15,0.7).toFixed(2)+' < '+pumpBHPat(15,1.0).toFixed(2)+' HP)');
   else console.log('✗ VFD lower speed should reduce shaft load');
